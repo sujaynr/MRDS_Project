@@ -29,7 +29,7 @@ colnames = df.columns.tolist()
 # print("Column names:", colnames)
 
 df['region'] = df['region'].fillna('NA')
-df = df.sample(frac=0.1, random_state=1)
+# df = df.sample(frac=0.1, random_state=1)
 
 values = {"commod1": "", "commod2": "", "commod3": ""}
 df[['commod1', 'commod2', 'commod3']] = df[['commod1', 'commod2', 'commod3']].fillna(value=values)
@@ -42,7 +42,7 @@ df = df[df['commodities'] != '']
 local_map_path = "/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_admin_0_countries.shp"
 gdf = gpd.read_file(local_map_path)
 north_america = gdf[gdf['CONTINENT'] == 'North America']
-elem = 'Lead'
+elem = 'Diamond'
 elem_df = df[df['commodities'].str.strip() == elem]
 
 score_amplitude = {'A': 1, 'B': 0.8, 'C': 0.6, 'D': 0.4, 'E': 0.2}
@@ -114,9 +114,9 @@ for score, z in score_layers.items():
 
     north_america.plot(ax=ax, color='none', edgecolor='black')
 
-    ax.set_title(f'Observations of Score {score} in the Continental US ({elem} 10%)', fontsize=20)
+    ax.set_title(f'Observations of Score {score} in the Continental US ({elem} 100%)', fontsize=20)
     ax.set_xlabel('Longitude', fontsize=15)
     ax.set_ylabel('Latitude', fontsize=15)
 
-    plt.savefig(os.path.join(output_dir, f'Layer_{score}_{elem}10%.png'))
+    plt.savefig(os.path.join(output_dir, f'Layer_{score}_{elem}100%.png'))
     plt.close()
