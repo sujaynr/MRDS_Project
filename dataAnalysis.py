@@ -1,4 +1,5 @@
 # /Users/sujaynair/anaconda3/envs/dataAnalysis/bin/pip3 install X
+# SOON TO BE DEPRECIATED
 import os
 import pandas as pd
 import numpy as np
@@ -31,9 +32,9 @@ local_map_path = "/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_a
 gdf = gpd.read_file(local_map_path)
 north_america = gdf[gdf['CONTINENT'] == 'North America']
 
-elem = 'Iron'
-elem_df = df[df['commodities'].str.strip() == elem]
-sampled_elem_df = elem_df.sample(frac=0.1, random_state=1)
+# elem = 'Nickel'
+# elem_df = df[df['commodities'].str.strip() == elem]
+# sampled_elem_df = elem_df.sample(frac=0.2, random_state=1)
 
 score_amplitude = {'A': 1, 'B': 0.8, 'C': 0.6, 'D': 0.4, 'E': 0.2}
 
@@ -47,47 +48,53 @@ z = np.zeros((grid_size, grid_size))
 pixel_size_x = (x_max - x_min) / grid_size
 pixel_size_y = (y_max - y_min) / grid_size
 
-# Define 2D arrays for each quality layer
-z_A = np.zeros((grid_size, grid_size))
-z_B = np.zeros((grid_size, grid_size))
-z_C = np.zeros((grid_size, grid_size))
-z_D = np.zeros((grid_size, grid_size))
-z_E = np.zeros((grid_size, grid_size))
+def create_layers(elem_df):
+    z_A = np.zeros((grid_size, grid_size))
+    z_B = np.zeros((grid_size, grid_size))
+    z_C = np.zeros((grid_size, grid_size))
+    z_D = np.zeros((grid_size, grid_size))
+    z_E = np.zeros((grid_size, grid_size))
 
-for i in range(grid_size):
-    for j in range(grid_size):
-        lon_min = x_min + j * pixel_size_x
-        lon_max = lon_min + pixel_size_x
-        lat_max = y_max - i * pixel_size_y
-        lat_min = lat_max - pixel_size_y
+    for i in range(grid_size):
+        for j in range(grid_size):
+            lon_min = x_min + j * pixel_size_x
+            lon_max = lon_min + pixel_size_x
+            lat_max = y_max - i * pixel_size_y
+            lat_min = lat_max - pixel_size_y
 
-        print(f"Pixel [{i}, {j}] boundaries: Longitude ({lon_min}, {lon_max}), Latitude ({lat_min}, {lat_max})")
+            for _, row in elem_df.iterrows():
+                if lon_min <= row['longitude'] < lon_max and lat_min <= row['latitude'] < lat_max:
+                    if row['score'] == 'A':
+                        z_A[i, j] += 1
+                        z_B[i, j] += 1
+                        z_C[i, j] += 1
+                        z_D[i, j] += 1
+                        z_E[i, j] += 1
+                    elif row['score'] == 'B':
+                        z_B[i, j] += 1
+                        z_C[i, j] += 1
+                        z_D[i, j] += 1
+                        z_E[i, j] += 1
+                    elif row['score'] == 'C':
+                        z_C[i, j] += 1
+                        z_D[i, j] += 1
+                        z_E[i, j] += 1
+                    elif row['score'] == 'D':
+                        z_D[i, j] += 1
+                        z_E[i, j] += 1
+                    elif row['score'] == 'E':
+                        z_E[i, j] += 1
 
-        for _, row in sampled_elem_df.iterrows():
-            if lon_min <= row['longitude'] < lon_max and lat_min <= row['latitude'] < lat_max:
-                print(f"Yes: ({row['score']}) quality resource at {row['site_name']}, {row['county']}, {row['state']} at ({row['longitude']}, {row['latitude']}) is in pixel [{i}, {j}]")
-                if row['score'] == 'A':
-                    z_A[i, j] += 1
-                    z_B[i, j] += 1
-                    z_C[i, j] += 1
-                    z_D[i, j] += 1
-                    z_E[i, j] += 1
-                elif row['score'] == 'B':
-                    z_B[i, j] += 1
-                    z_C[i, j] += 1
-                    z_D[i, j] += 1
-                    z_E[i, j] += 1
-                elif row['score'] == 'C':
-                    z_C[i, j] += 1
-                    z_D[i, j] += 1
-                    z_E[i, j] += 1
-                elif row['score'] == 'D':
-                    z_D[i, j] += 1
-                    z_E[i, j] += 1
-                elif row['score'] == 'E':
-                    z_E[i, j] += 1
+    return np.stack([z_A, z_B, z_C, z_D, z_E], axis=0)
 
-score_layers = {'A': z_A, 'B': z_B, 'C': z_C, 'D': z_D, 'E': z_E}
+
+elem = 'Diamond'
+elem_df = df[df['commodities'].str.strip() == elem]
+sampled_elem_df = elem_df.sample(frac=1, random_state=1)
+layers = create_layers(sampled_elem_df)
+pdb.set_trace()
+
+score_layers = {'A': layers[0], 'B': layers[1], 'C': layers[2], 'D': layers[3], 'E': layers[4]}
 output_dir = f'LayerPlots/{elem}'
 os.makedirs(output_dir, exist_ok=True)
 for score, z in score_layers.items():
@@ -101,9 +108,9 @@ for score, z in score_layers.items():
 
     north_america.plot(ax=ax, color='none', edgecolor='black')
 
-    ax.set_title(f'Observations of Score {score} in the Continental US ({elem} 10%)', fontsize=20)
+    ax.set_title(f'Observations of Score {score} in the Continental US ({elem} 20%)', fontsize=20)
     ax.set_xlabel('Longitude', fontsize=15)
     ax.set_ylabel('Latitude', fontsize=15)
 
-    plt.savefig(os.path.join(output_dir, f'Layer_{score}_{elem}10%.png'))
+    plt.savefig(os.path.join(output_dir, f'Layer_{score}_{elem}20%.png'))
     plt.close()
