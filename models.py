@@ -1,5 +1,4 @@
 # models.py
-
 import torch
 import torch.nn as nn
 
@@ -34,3 +33,4 @@ class MineralTransformer(nn.Module):
         
         output = self.final_projection(output.view(batch_size * seq_length, -1))
         return output.view(batch_size, seq_length, grid_size, grid_size)
+

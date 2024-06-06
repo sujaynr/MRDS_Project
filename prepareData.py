@@ -65,7 +65,7 @@ df = df.assign(commodities=df['commodities'].str.split(',')).explode('commoditie
 df = df[df['commodities'] != '']
 
 
-elements = ['Nickel', 'Zinc']
+elements = ['Tungsten', 'Manganese', 'Lead']
 data_dir = 'prepared_data'
 os.makedirs(data_dir, exist_ok=True)
 

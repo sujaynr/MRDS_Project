@@ -1,4 +1,4 @@
-# /Users/sujaynair/anaconda3/envs/dataAnalysis/bin/pip3 install X
+# /Users/sujaynair/anaconda3/envs/dataAnalysis/bin/pip3 install opencv-python
 # SOON TO BE DEPRECIATED
 import os
 import pandas as pd
