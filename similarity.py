@@ -1,9 +1,10 @@
 import pickle
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 import matplotlib.pyplot as plt
 
-elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium']
+elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead']
 data = np.zeros((len(elements), 5), dtype=object)
 dice_sorensen_matrix = np.zeros((len(elements), len(elements), 5))
 
@@ -11,7 +12,7 @@ for i, elem in enumerate(elements):
     for j in range(5):
         with open(f'prepared_data/{elem}_layers(100%).pkl', 'rb') as f:
             elem_data = pickle.load(f)
-        data[i, j] = elem_data[j]
+        data[i, j] = gaussian_filter(elem_data[j], sigma=1)
 
 for i in range(5):
     print(f"Quality level {chr(65+i)}:")
@@ -29,7 +30,6 @@ for k in range(5):
                 union = np.sum(data[i, k]) + np.sum(data[j, k])
                 dice_sorensen_matrix[i, j, k] = 2.0 * intersection / union
 
-
 fig, axs = plt.subplots(1, 5, figsize=(20, 4))
 
 for k in range(5):
@@ -44,7 +44,7 @@ for k in range(5):
 
     for i in range(len(elements)):
         for j in range(len(elements)):
-            text = ax.text(j, i, f"{dice_sorensen_matrix[i, j, k]:.2f}", ha="center", va="center", color="w")
+            text = ax.text(j, i, f"{dice_sorensen_matrix[i, j, k]:.1f}", ha="center", va="center", color="w")
 
 plt.tight_layout()
 plt.savefig('mineralSimilarity.png')
