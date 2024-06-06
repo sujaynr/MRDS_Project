@@ -1,11 +1,13 @@
 # train.py
 import os
 import pickle
+import pdb
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from scipy.ndimage import gaussian_filter
 from models import MineralTransformer
 
@@ -53,7 +55,7 @@ output_tensor = torch.tensor(output_layers, dtype=torch.float32).view(batch_size
 
 model = MineralTransformer(d_model=d_model)
 
-def train(model, input_tensor, output_tensor, num_epochs=50, learning_rate=0.001):
+def train(model, input_tensor, output_tensor, num_epochs=100, learning_rate=0.0001):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
@@ -83,8 +85,10 @@ output_np = output_tensor.numpy()
 predicted_np = predicted_output.numpy()
 
 # Gaussian smoothing
-smoothed_output_np = gaussian_smooth_and_normalize(predicted_np[0])
-
+smoothed_predicted_np = gaussian_smooth_and_normalize(predicted_np[0])
+smoothed_output_np = gaussian_smooth_and_normalize(output_np[0])
+smoothed_input_np = gaussian_smooth_and_normalize(input_np[0])
+pdb.set_trace()
 # Visualization
 def visualize_layers(layers, title, cmap='viridis'):
     fig, axes = plt.subplots(1, 5, figsize=(20, 4))
@@ -95,30 +99,49 @@ def visualize_layers(layers, title, cmap='viridis'):
     fig.suptitle(title)
     plt.show()
 
-visualize_layers(input_np[0], 'Original Gold Layers (Input)')
-visualize_layers(output_np[0], 'Original Silver Layers (Output)')
-
-visualize_layers(predicted_np[0], 'Predicted Silver Layers (Output)')
-
-visualize_layers(smoothed_output_np, 'Smoothed and Normalized Predicted Silver Layers')
-
 output_dir = 'trainingVis'
 os.makedirs(output_dir, exist_ok=True)
 
-for i in range(5):
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-    
-    axes[0].imshow(input_np[0][i], cmap='viridis')
-    axes[0].set_title(f'Gold Layer {chr(65+i)} (Input)')
-    
-    axes[1].imshow(output_np[0][i], cmap='viridis')
-    axes[1].set_title(f'Original Silver Layer {chr(65+i)}')
-    
-    axes[2].imshow(predicted_np[0][i], cmap='viridis')
-    axes[2].set_title(f'Predicted Silver Layer {chr(65+i)}')
-    
-    axes[3].imshow(smoothed_output_np[i], cmap='viridis')
-    axes[3].set_title(f'Smoothed Predicted Silver Layer {chr(65+i)}')
-    
-    plt.savefig(os.path.join(output_dir, f'comparison_layer_{chr(65+i)}.png'))
-    plt.close()
+
+layer_colors = ['red', 'orange', 'yellow', 'blue', 'green']
+layer_names = ['Layer A', 'Layer B', 'Layer C', 'Layer D', 'Layer E']
+alpha_values = [1.0, 1.0, 0.9, 0.8, 0.8]
+
+def get_combined_layer(data, end_layer):
+    combined_layer = np.sum(data[:end_layer+1], axis=0)
+    return combined_layer
+
+fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+
+for ax, data, title in zip(
+    axes[0],
+    [input_np[0], output_np[0], predicted_np[0]],
+    ['Gold Layer', 'Original Silver Layer', 'Predicted Silver Layer']
+):
+    for i in reversed(range(5)):  # Plot E (bottom) to A (top)
+        combined_layer = get_combined_layer(data, i)
+        X, Y = np.meshgrid(np.arange(combined_layer.shape[0]), np.arange(combined_layer.shape[1]))
+        contour = ax.contour(X, Y, combined_layer, levels=10, colors=[layer_colors[i]], alpha=alpha_values[i])
+    ax.set_title(title)
+    ax.axis('off')
+
+for ax, data, title in zip(
+    axes[1],
+    [smoothed_input_np, smoothed_output_np, smoothed_predicted_np],
+    ['Smoothed Gold Layer', 'Smoothed Silver Layer', 'Smoothed Predicted Silver Layer']
+):
+    for i in reversed(range(5)):  # E at bottom
+        combined_layer = get_combined_layer(data, i)
+        X, Y = np.meshgrid(np.arange(combined_layer.shape[0]), np.arange(combined_layer.shape[1]))
+        contour = ax.contour(X, Y, combined_layer, levels=10, colors=[layer_colors[i]], alpha=alpha_values[i])
+    ax.set_title(title)
+    ax.axis('off')
+
+handles = [plt.Line2D([0, 1], [0, 1], color=color, lw=4, alpha=alpha) for color, alpha in zip(layer_colors, alpha_values)]
+labels = layer_names
+
+axes[1, -1].legend(handles, labels, loc='upper right', bbox_to_anchor=(1.15, 1))
+
+plt.savefig(os.path.join(output_dir, 'contour_stacked_comparison_all_layers.png'))
+plt.show()
+
