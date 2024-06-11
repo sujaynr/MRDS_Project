@@ -2,196 +2,163 @@ import os
 import pickle
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter
+
 import torch.nn as nn
 import torch.optim as optim
-import pdb
-from torch.utils.data import DataLoader, Dataset
-
+import matplotlib.pyplot as plt
 
 # Set the conda environment
 conda_env = '/Users/sujaynair/anaconda3/envs/dataAnalysis'
 os.environ['CONDA_PREFIX'] = conda_env
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-class ElementQualityTransformer(nn.Module):
-    def __init__(self, spatial_dim=900, quality_dim=5, element_dim=100, d_model=None, nhead=8, num_layers=6):
-        super(ElementQualityTransformer, self).__init__()
-        if d_model is None:
-            d_model = (spatial_dim * quality_dim + element_dim + nhead - 1) // nhead * nhead  # Ensure divisibility by nhead
+grid_size = 30
+d_model = 512
+use_sticky_markov = True
+use_validation = False
+same_scale = False
 
-        self.spatial_embedding = nn.Linear(spatial_dim * quality_dim, d_model)
-        self.element_embedding = nn.Embedding(100, element_dim)  # Assuming 100 unique elements
-        self.encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
-        self.decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead)
-        self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=num_layers)
-        self.output_projection = nn.Linear(d_model, spatial_dim * quality_dim)  # Project back to the original size
+def gaussian_smooth_and_normalize(layers, sigma=1.0):
+    smoothed_layers = []
+    for layer in layers:
+        smoothed_layer = gaussian_filter(layer, sigma=sigma)
+        normalized_layer = smoothed_layer * (layer.sum() / smoothed_layer.sum())
+        smoothed_layers.append(normalized_layer)
+    return np.stack(smoothed_layers, axis=0)
 
-    def forward(self, input_elements, input_grids, output_elements):
-        print(input_elements.shape, input_grids.shape, output_elements.shape)
-        
-        # Ensure input_grids has shape (batch_size, n, 5, 30, 30)
-        batch_size, n, q, h, w = input_grids.shape
-        assert q == 5 and h == 30 and w == 30, f"input_grids has incorrect shape: {input_grids.shape}"
-        
-        m = output_elements.shape[0]  # Number of output elements
-
-        spatial_dim = 900  # Flattened 30x30
-        element_dim = 100  # Embedding dimension for elements
-        d_model = self.encoder_layer.self_attn.embed_dim  # Get the d_model from encoder layer
-
-        # Flatten and embed input grids
-        input_grids = input_grids.view(batch_size, n, q * h * w)  # (batch_size, n, 5 * 30 * 30)
-        print(input_grids.shape)
-        spatial_embeds = self.spatial_embedding(input_grids)  # (batch_size, n, d_model)
-        print(spatial_embeds.shape)
-
-        assert spatial_embeds.shape == (batch_size, n, d_model), f"spatial_embeds has incorrect shape: {spatial_embeds.shape}"
-
-        # Embed elements
-        input_element_embeds = self.element_embedding(input_elements)  # (batch_size, n, element_dim)
-
-        assert input_element_embeds.shape == (batch_size, n, element_dim), f"input_element_embeds has incorrect shape: {input_element_embeds.shape}"
-
-        # Combine embeddings
-        input_embeds = torch.cat((spatial_embeds, input_element_embeds), dim=-1)  # (batch_size, n, d_model + element_dim)
-
-        assert input_embeds.shape == (batch_size, n, d_model + element_dim), f"input_embeds has incorrect shape: {input_embeds.shape}"
-
-        # Encoder
-        encoder_output = self.encoder(input_embeds)  # (batch_size, n, d_model + element_dim)
-
-        assert encoder_output.shape == (batch_size, n, d_model + element_dim), f"encoder_output has incorrect shape: {encoder_output.shape}"
-
-        # Prepare target embeddings for decoder
-        output_element_embeds = self.element_embedding(output_elements).unsqueeze(1)  # (batch_size, 1, element_dim)
-        output_element_embeds = output_element_embeds.repeat(1, m, 1)  # (batch_size, m, element_dim)
-
-        assert output_element_embeds.shape == (batch_size, m, element_dim), f"output_element_embeds has incorrect shape: {output_element_embeds.shape}"
-
-        # Create decoder input embeddings (can be zero-initialized or learned embeddings for start tokens)
-        decoder_input_embeds = torch.zeros((batch_size, m, d_model), device=input_elements.device)  # (batch_size, m, d_model)
-        decoder_input_embeds[:, :, :element_dim] = output_element_embeds  # Use element embeddings for decoder inputs
-
-        assert decoder_input_embeds.shape == (batch_size, m, d_model), f"decoder_input_embeds has incorrect shape: {decoder_input_embeds.shape}"
-
-        # Decoder
-        decoder_output = self.decoder(decoder_input_embeds, encoder_output)  # (batch_size, m, d_model)
-
-        assert decoder_output.shape == (batch_size, m, d_model), f"decoder_output has incorrect shape: {decoder_output.shape}"
-
-        # Project to the original concatenated size
-        output = self.output_projection(decoder_output)  # (batch_size, m, spatial_dim * quality_dim)
-
-        assert output.shape == (batch_size, m, spatial_dim * quality_dim), f"output has incorrect shape: {output.shape}"
-
-        # Reshape to (batch_size, m, 5, 30, 30)
-        output = output.view(batch_size, m, 5, 30, 30)
-
-        assert output.shape == (batch_size, m, 5, 30, 30), f"output has incorrect shape: {output.shape}"
-
-        return output
-
-# Data loading
 data_dir = 'prepared_data'
-elements = ['Gold', 'Silver', 'Nickel']
+elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead', 'Clay', 'Copper', 'Sand and Gravel', 'Stone', 'Vanadium']
 data = {}
 
 for elem in elements:
     with open(os.path.join(data_dir, f'{elem}_layers(100%).pkl'), 'rb') as f:
         data[elem] = pickle.load(f)
 
-def prepare_data(data):
-    prepared_data = []
-    gold_data = data['Gold']
-    silver_data = data['Silver']
-    nickel_data = data['Nickel']
+input_elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper']
+output_elements = ['Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
 
-    assert gold_data.shape == silver_data.shape == nickel_data.shape, "All data elements must have the same shape"
-    assert gold_data.shape == (5, 30, 30), "Data elements must have the shape (5, 30, 30)"
+input_layers = np.stack([data[elem] for elem in input_elements], axis=0)
+output_layers = np.stack([data[elem] for elem in output_elements], axis=0)
 
-    for i in range(gold_data.shape[1]):  # Iterate over the second dimension (30)
-        for j in range(gold_data.shape[2]):  # Iterate over the third dimension (30)
-            input_elements = torch.tensor([0, 1], dtype=torch.long)  # Indices for Gold and Silver
-            
-            gold_grid = torch.tensor(gold_data[:, i, j], dtype=torch.float32).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)  # Shape (1, 5, 1, 1)
-            silver_grid = torch.tensor(silver_data[:, i, j], dtype=torch.float32).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)  # Shape (1, 5, 1, 1)
-            nickel_grid = torch.tensor(nickel_data[:, i, j], dtype=torch.float32).unsqueeze(-1).unsqueeze(-1)  # Shape (5, 1, 1)
+print("Initial input layers shape:", input_layers.shape)
+print("Initial output layers shape:", output_layers.shape)
 
-            input_grids = torch.cat([gold_grid, silver_grid], dim=0)  # Shape (2, 5, 1, 1)
-            input_grids = input_grids.repeat(1, 1, 30, 30)  # Shape (2, 5, 30, 30)
+# Reshape the input and output to be 3D: (batch_size, sequence_length, feature_dimension)
+batch_size = input_layers.shape[0]
+sequence_length = input_layers.shape[1]
+feature_dimension = grid_size * grid_size
 
-            assert input_grids.shape == (2, 5, 30, 30), f"input_grids shape mismatch: {input_grids.shape}"
+input_layers = input_layers.reshape(batch_size, sequence_length, feature_dimension)
+output_layers = output_layers.reshape(batch_size, sequence_length, feature_dimension)
 
-            input_grids = input_grids.unsqueeze(0)  # Add batch dimension, shape (1, 2, 5, 30, 30)
-            
-            assert input_grids.shape == (1, 2, 5, 30, 30), f"input_grids shape mismatch after unsqueeze: {input_grids.shape}"
+print("Reshaped input layers shape:", input_layers.shape)
+print("Reshaped output layers shape:", output_layers.shape)
 
-            output_elements = torch.tensor([2], dtype=torch.long)  # Index for Nickel
-            output_grids = nickel_grid.repeat(1, 30, 30)  # Shape (5, 30, 30)
-            output_grids = output_grids.unsqueeze(0)  # Shape (1, 5, 30, 30)
+input_tensor_train = torch.tensor(input_layers, dtype=torch.float32)
+output_tensor_train = torch.tensor(output_layers, dtype=torch.float32)
 
-            assert output_grids.shape == (1, 5, 30, 30), f"output_grids shape mismatch: {output_grids.shape}"
+print("Train input tensor shape:", input_tensor_train.shape)
+print("Train output tensor shape:", output_tensor_train.shape)
 
-            prepared_data.append((input_elements, input_grids, output_elements, output_grids))
-    
-    return prepared_data
+class MineralTransformer(nn.Module):
+    def __init__(self, d_model=512, nhead=8, num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=2048, dropout=0.2):
+        super(MineralTransformer, self).__init__()
+        self.input_projection = nn.Linear(grid_size * grid_size, d_model)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True)
+        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_encoder_layers)
+        
+        self.decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True)
+        self.decoder = nn.TransformerDecoder(self.decoder_layer, num_decoder_layers)
+        
+        self.output_projection = nn.Linear(d_model, grid_size * grid_size)
+        
+        self.layer_norm = nn.LayerNorm(d_model)
 
-prepared_data = prepare_data(data)
-pdb.set_trace()
+    def forward(self, src, tgt):
+        batch_size, seq_length, feature_dim = src.shape
+        
+        src = self.input_projection(src)
+        tgt = self.input_projection(tgt)
+        
+        src = self.layer_norm(src)
+        tgt = self.layer_norm(tgt)
+        
+        memory = self.encoder(src)
+        output = self.decoder(tgt, memory)
+        
+        output = self.output_projection(output)
+        return output.view(batch_size, seq_length, grid_size, grid_size)
 
-class ElementQualityDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
+model = MineralTransformer(d_model=d_model)
 
-    def __len__(self):
-        return len(self.data)
+def train(model, input_tensor_train, output_tensor_train, num_epochs=100, learning_rate=0.0001):
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
 
-    def __getitem__(self, idx):
-        input_elements, input_grids, output_elements, output_grids = self.data[idx]
-        return (input_elements, input_grids, output_elements, output_grids)
-
-
-
-def train_model(model, dataloader, criterion, optimizer, num_epochs=10):
     for epoch in range(num_epochs):
         model.train()
-        running_loss = 0.0
-        for i, (input_elements, input_grids, output_elements, output_grids) in enumerate(dataloader):
-            # Move tensors to the appropriate device
-            input_elements = input_elements.to(device)
-            input_grids = input_grids.to(device)
-            output_elements = output_elements.to(device)
-            output_grids = output_grids.to(device)
+        optimizer.zero_grad()
+        outputs = model(input_tensor_train, output_tensor_train)
+        loss = criterion(outputs.view(-1, grid_size * grid_size), output_tensor_train.view(-1, grid_size * grid_size))
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping, maybe not necessary
+        optimizer.step()
 
-            # Zero the parameter gradients
-            optimizer.zero_grad()
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}')
+        pdb.set_trace()
 
-            # Forward pass
-            outputs = model(input_elements, input_grids, output_elements)
+train(model, input_tensor_train, output_tensor_train)
 
-            # Compute the loss
-            loss = criterion(outputs, output_grids)
-            loss.backward()
-            optimizer.step()
+model.eval()
+with torch.no_grad():
+    predicted_output_train = model(input_tensor_train, output_tensor_train)
 
-            # Print statistics
-            running_loss += loss.item()
-            if i % 10 == 9:  # Print every 10 mini-batches
-                print(f'[Epoch {epoch + 1}, Batch {i + 1}] loss: {running_loss / 10:.3f}')
-                running_loss = 0.0
+input_np_train = input_tensor_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
+output_np_train = output_tensor_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
+predicted_np_train = predicted_output_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
 
-    print('Finished Training')
+# Gaussian smoothing
+smoothed_predicted_np_train = gaussian_smooth_and_normalize(predicted_np_train[0])
+smoothed_output_np_train = gaussian_smooth_and_normalize(output_np_train[0])
+smoothed_input_np_train = gaussian_smooth_and_normalize(input_np_train[0])
 
-# Create the dataset and dataloader
-dataset = ElementQualityDataset(prepared_data)
-dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+#VIS
+def visualize_layers(layer_index, input_data, output_data, predicted_data, input_elements, output_elements):
+    fig, axes = plt.subplots(3, max(len(input_elements), len(output_elements)), figsize=(20, 15))
+    plt.subplots_adjust(hspace=0.4, wspace=0.4)
+    
+    # Input
+    for j in range(len(input_elements)):
+        ax = axes[0, j]
+        im = ax.imshow(input_data[j][layer_index], cmap='viridis')
+        ax.set_title(f'{input_elements[j]} Layer {chr(65+layer_index)}')
+        plt.colorbar(im, ax=ax)
+    
+    # GT
+    for k in range(len(output_elements)):
+        ax = axes[1, k]
+        im = ax.imshow(output_data[k][layer_index], cmap='viridis')
+        ax.set_title(f'{output_elements[k]} Layer {chr(65+layer_index)}')
+        plt.colorbar(im, ax=ax)
+    
+    # Predictions
+    for l in range(len(output_elements)):
+        ax = axes[2, l]
+        im = ax.imshow(predicted_data[l][layer_index], cmap='viridis')
+        ax.set_title(f'Predicted {output_elements[l]} Layer {chr(65+layer_index)}')
+        plt.colorbar(im, ax=ax)
+    
+    fig.suptitle(f'Comparison for Quality Layer {chr(65+layer_index)}', fontsize=16)
+    plt.savefig(os.path.join('trainingVis', f'comparison_layer_{chr(65+layer_index)}.png'))
+    plt.show()
 
-# Initialize the model, criterion, and optimizer
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = ElementQualityTransformer().to(device)
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Train the model
-train_model(model, dataloader, criterion, optimizer, num_epochs=10)
+for i in range(5): # By quality
+    visualize_layers(i, input_np_train, output_np_train, predicted_np_train, input_elements, output_elements)
+
+# Metric
+for i in range(5):
+    predicted_sum = np.sum(predicted_np_train[0][i])
+    ground_truth_sum = np.sum(output_np_train[0][i])
+    metric = predicted_sum / ground_truth_sum
+    print(f'Layer {chr(65+i)}: Metric = {metric}')
