@@ -4,7 +4,7 @@ from scipy.ndimage import gaussian_filter
 
 import matplotlib.pyplot as plt
 
-elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead']
+elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead', 'Clay', 'Copper', 'Sand and Gravel', 'Stone', 'Vanadium']
 data = np.zeros((len(elements), 5), dtype=object)
 dice_sorensen_matrix = np.zeros((len(elements), len(elements), 5))
 
@@ -41,10 +41,6 @@ for k in range(5):
     ax.set_xticklabels(elements)
     ax.set_yticklabels(elements)
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
-
-    for i in range(len(elements)):
-        for j in range(len(elements)):
-            text = ax.text(j, i, f"{dice_sorensen_matrix[i, j, k]:.1f}", ha="center", va="center", color="w")
 
 plt.tight_layout()
 plt.savefig('mineralSimilarity.png')

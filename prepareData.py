@@ -63,9 +63,8 @@ df[['commod1', 'commod2', 'commod3']] = df[['commod1', 'commod2', 'commod3']].as
 df['commodities'] = df.apply(lambda x: ','.join(filter(None, [x['commod1'], x['commod2'], x['commod3']])), axis=1)
 df = df.assign(commodities=df['commodities'].str.split(',')).explode('commodities')
 df = df[df['commodities'] != '']
-
-
-elements = ['Tungsten', 'Manganese', 'Lead']
+df = df[df['dev_stat'] != 'Plant']
+elements = ['Sand and Gravel', 'Vanadium', 'Copper', 'Clay', 'Stone']
 data_dir = 'prepared_data'
 os.makedirs(data_dir, exist_ok=True)
 
