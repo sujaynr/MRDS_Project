@@ -1,5 +1,7 @@
 import torch
+import pdb
 import torch.nn as nn
+import torch.nn.functional as F
 
 grid_size = 30
 
@@ -50,17 +52,21 @@ class MineralTransformer(nn.Module):
     def forward(self, src, tgt):
         batch_size, seq_length_input, feature_dim_input = src.shape
         seq_length_output = tgt.shape[1]  # Get the sequence length of the output
-
+        # print("src shape:", src.shape, "tgt shape:", tgt.shape)
         src = self.input_projection(src)
         tgt = self.input_projection(tgt)
-        
+        # print("src shape:", src.shape, "tgt shape:", tgt.shape)
         src = self.layer_norm(src)
         tgt = self.layer_norm(tgt)
-        
+        # print("src shape:", src.shape, "tgt shape:", tgt.shape)
         memory = self.encoder(src)
         output = self.decoder(tgt, memory)
-        
+        # print("output shape:", output.shape)
         output = self.output_projection(output)
-        output = torch.softmax(output, dim=-1)  # Apply softmax to the output
+        # print("output shape:", output.shape)
         
-        return output.view(batch_size, seq_length_output, grid_size, grid_size)
+        output = output.view(batch_size, seq_length_output, grid_size, grid_size)
+
+        output_cumsum = torch.cumsum(output, dim=1)
+        
+        return output_cumsum

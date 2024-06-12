@@ -85,10 +85,10 @@ plt.legend()
 plt.title('US, Non-US Land, and Ocean Masks')
 plt.xlabel('Longitude')
 plt.ylabel('Latitude')
-plt.show()
+# plt.show()
 
 
-def train(model, input_tensor_train, output_tensor_train, num_epochs=100, learning_rate=0.0001):
+def train(model, input_tensor_train, output_tensor_train, num_epochs=500, learning_rate=0.0001):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
@@ -96,6 +96,7 @@ def train(model, input_tensor_train, output_tensor_train, num_epochs=100, learni
         model.train()
         optimizer.zero_grad()
         outputs = model(input_tensor_train, output_tensor_train)
+        # pdb.set_trace()
         loss = criterion(outputs.view(-1, grid_size * grid_size), output_tensor_train.view(-1, grid_size * grid_size))
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
@@ -127,7 +128,7 @@ mask_layer_expanded = np.repeat(mask_layer_expanded, input_layers.shape[1], axis
 
 
 input_layers_with_mask = np.concatenate((input_layers, mask_layer_expanded), axis=1)
-pdb.set_trace()
+# pdb.set_trace()
 
 smoothed_input_layers = np.array([gaussian_smooth_and_normalize(layer) for layer in input_layers_with_mask])
 smoothed_output_layers = np.array([gaussian_smooth_and_normalize(layer) for layer in output_layers])
@@ -158,9 +159,8 @@ print("Train output tensor shape:", output_tensor_train.shape)
 
 
 model = MineralTransformer(d_model=d_model)
-
-
 train(model, input_tensor_train, output_tensor_train)
+
 
 model.eval()
 with torch.no_grad():
@@ -179,19 +179,17 @@ smoothed_predicted_np_train = np.array([gaussian_smooth_and_normalize(predicted_
 for i in range(5): # By quality
     visualize_layers(i, input_np_train, output_np_train, smoothed_predicted_np_train, input_elements, output_elements)
 
-for i in range(5):
-    predicted_sum = np.sum(predicted_np_train[0][i])
-    ground_truth_sum = np.sum(output_np_train[0][i])
-    metric = predicted_sum / ground_truth_sum
-    print(f'Layer {chr(65+i)}: Metric = {metric}')
+
 
 
 # Dice coefficients for each layer
 dice_coeffs = compute_dice_coefficients(smoothed_predicted_np_train, output_np_train, threshold=0.05)
 
-for layer_index, dice_per_layer in dice_coeffs.items():
-    print(f'Quality Layer {chr(65+layer_index)}: Dice Coefficients = {dice_per_layer}')
-
-
 
 plot_dice_coefficients(dice_coeffs, output_elements)
+
+for i in range(5):
+    predicted_sum = np.sum(predicted_np_train[0][i])
+    ground_truth_sum = np.sum(output_np_train[0][i])
+    metric = predicted_sum / ground_truth_sum
+    print(f'Layer {chr(65+i)}: Metric = {metric}')
