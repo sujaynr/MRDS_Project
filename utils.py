@@ -4,6 +4,16 @@ import matplotlib.pyplot as plt
 
 from scipy.ndimage import gaussian_filter
 
+def plot_metric(metric_values, layers):
+    x = np.arange(len(layers))
+    plt.bar(x, metric_values)
+    plt.xticks(x, layers)
+    plt.title('Custom Metric')
+    plt.xlabel('Layer')
+    plt.ylabel('Metric Value')
+    plt.savefig('trainingVis/metric_plot.png')
+    plt.close()
+
 
 def gaussian_smooth_and_normalize(layers, sigma=1.0):
     smoothed_layers = []
