@@ -1,2 +1,3 @@
 trainingVis/
 __pycache__/
+wandb/
