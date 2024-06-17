@@ -51,8 +51,7 @@ def visualize_layers(layer_index, input_data, output_data, predicted_data, input
     fig.suptitle(f'Comparison for Quality Layer {chr(65+layer_index)}', fontsize=16)
     plt.savefig(os.path.join('trainingVis', f'comparison_layer_{chr(65+layer_index)}.png'))
     plt.show()
-
-
+    
 def calculate_dice_coefficient(pred, gt, threshold=0.05):
     pred_binary = pred > threshold
     gt_binary = gt > threshold
