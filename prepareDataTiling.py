@@ -7,8 +7,10 @@ from shapely.geometry import Point, box
 import matplotlib.pyplot as plt
 
 # File paths
-file_path = '/Users/sujaynair/Documents/mrds-csv/mrds.csv'
-shapefile_path = '/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_admin_0_countries.shp'
+# file_path = '/Users/sujaynair/Documents/mrds-csv/mrds.csv'
+# shapefile_path = '/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_admin_0_countries.shp'
+file_path = '/home/sujaynair/mrds.csv'
+shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
 data_dir = 'prepared_data_TILES'
 h5_file_path = os.path.join(data_dir, 'mineral_data.h5')
 
@@ -130,12 +132,11 @@ def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
     return squares
 
 # Create the HDF5 file
-squares = create_hdf5_file(h5_file_path, df, num_squares=20)
+squares = create_hdf5_file(h5_file_path, df, num_squares=2000)
 
 print("Data preparation completed.")
-
 # Visualization
-def visualize_squares(squares, us_shape):
+def visualize_squares(squares, us_shape, output_path='generated_squares.png'):
     fig, ax = plt.subplots(figsize=(15, 10))
     us_shape.boundary.plot(ax=ax, color='black')
     
@@ -145,7 +146,8 @@ def visualize_squares(squares, us_shape):
         gpd.GeoSeries([square_geom]).boundary.plot(ax=ax, color='red')
     
     plt.title("Randomly Generated Squares Overlaying the US")
-    plt.show()
+    plt.savefig(output_path)
+    plt.close(fig)
 
-# Visualize the generated squares
-visualize_squares(squares, us_shape)
+# Example usage
+visualize_squares(squares, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares.png')

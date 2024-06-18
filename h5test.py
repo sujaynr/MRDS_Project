@@ -1,10 +1,13 @@
 import os
 import h5py
+import pdb
 
 import matplotlib.pyplot as plt
 
-h5_file_path = '/Users/sujaynair/Documents/MRDS_Project/prepared_data_TILES/mineral_data.h5'
-output_dir = '/Users/sujaynair/Documents/MRDS_Project/tilingVIS'
+# h5_file_path = '/Users/sujaynair/Documents/MRDS_Project/prepared_data_TILES/mineral_data.h5'
+# output_dir = '/Users/sujaynair/Documents/MRDS_Project/tilingVIS'
+h5_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/mineral_data.h5'
+output_dir = '/home/sujaynair/MRDS_Project/tilingVIS'
 
 # Function to recursively print the structure of the HDF5 file
 def print_structure(name, obj):
@@ -26,9 +29,11 @@ with h5py.File(h5_file_path, 'r') as data:
     print(f"\n'counts' dataset shape: {counts.shape}, dtype: {counts.dtype}")
     print(f"'qualities' dataset shape: {qualities.shape}, dtype: {qualities.dtype}")
     
-    # Visualize all 20 slices of mineral 1
-    num_slices = 20  # Number of slices to visualize
+
+    num_slices = 100  # Number of slices to visualize
     mineral_index = 0  # Index of the mineral to visualize
+
+    pdb.set_trace()
 
     for i in range(num_slices):
         # Create a new figure for each slice
