@@ -1,309 +1,148 @@
+import wandb
 import os
 import pickle
 import pdb
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter
+from utils import visualize_layers, compute_dice_coefficients, plot_dice_coefficients, plot_metric, weighted_mse_loss
 from models import MineralTransformer
 
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
 
-# Set the conda environment
-conda_env = '/Users/sujaynair/anaconda3/envs/dataAnalysis'
-os.environ['CONDA_PREFIX'] = conda_env
+# Initialize wandb
+wandb.init(project="mineral_transformer_project", name="2048_0.0001TEST")
 
-grid_size = 30
-d_model = 512
-use_sticky_markov = True  # Set this flag to use the 2D Sticky Markov model for train/val split
-use_validation = False     # Flag to control whether to use a validation set
-same_scale = False         # Flag to control whether to use the same color scale for all plots
+grid_size = 60
+d_model = 256
 
-def gaussian_smooth_and_normalize(layers, sigma=1.0):
-    smoothed_layers = []
-    for layer in layers:
-        smoothed_layer = gaussian_filter(layer, sigma=sigma)
-        normalized_layer = smoothed_layer * (layer.sum() / smoothed_layer.sum())
-        smoothed_layers.append(normalized_layer)
-    return np.stack(smoothed_layers, axis=0)
+losses = []
 
-def generate_sticky_markov_mask(grid_size, train_ratio=0.7):
-    np.random.seed(0)  # For reproducibility
-    mask = np.zeros((grid_size, grid_size), dtype=bool)
-    start_train = np.random.choice([True, False], size=(1,))[0]
-    current_state = start_train
-    for i in range(grid_size):
-        for j in range(grid_size):
-            if np.random.rand() < 0.9:  # High probability to stay in the current state
-                mask[i, j] = current_state
-            else:
-                current_state = not current_state
-                mask[i, j] = current_state
-    if mask.sum() / mask.size < train_ratio:
-        mask = ~mask
-    # Apply Gaussian blur to the mask
-    mask = gaussian_filter(mask.astype(float), sigma=1.0)
-    # Set fractional threshold for inclusion/exclusion
-    threshold = np.percentile(mask, train_ratio * 100)
-    mask = mask >= threshold
-    return mask.flatten()
+def train(model, input_tensor_train, output_tensor_train, num_epochs=500, learning_rate=0.001):
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
 
-data_dir = 'prepared_data'
-elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead', 'Clay', 'Copper', 'Sand and Gravel', 'Stone', 'Vanadium']
+    batch_size, seq_length_input, feature_dim = input_tensor_train.shape
+    seq_length_output = output_tensor_train.shape[1]
+
+    # We can penalize quality layers differently with this
+    weights = torch.ones_like(output_tensor_train)
+    weights[:, :5, :] = 1  # Set weights for A resources (for now not weighting with 1)
+
+    for epoch in range(num_epochs):
+        model.train()
+        optimizer.zero_grad()
+        outputsCS, outputs = model(input_tensor_train, output_tensor_train)
+
+        # Flatten for loss 
+        flat_outputsCS = outputsCS.view(batch_size, -1)
+        flat_output_tensor_train = output_tensor_train.view(batch_size, -1)
+
+        lossCS = weighted_mse_loss(flat_outputsCS, flat_output_tensor_train, weights.view(batch_size, -1))
+        lossCS.backward()
+        
+        flat_outputs = outputs.view(batch_size, -1)
+
+
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        losses.append(lossCS.item())
+        wandb.log({"Loss": lossCS.item()})
+
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {lossCS.item()}')
+
+    plt.plot(losses, label='Loss')
+    plt.title('Training Loss Curve')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig('trainingVis/loss_curve.png')
+    plt.close()
+
+    wandb.save('trainingVis/loss_curve.png')
+
+data_dir = 'prepared_data_60x60'
+elements = ['Gold', 'Silver', 'Nickel', 'Zinc', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Lead', 'Copper']
 data = {}
 
 for elem in elements:
     with open(os.path.join(data_dir, f'{elem}_layers(100%).pkl'), 'rb') as f:
         data[elem] = pickle.load(f)
 
-input_elements = ['Gold']
-output_elements = ['Silver']
+for elem in elements:
+    print(f"{elem} - A layer sum: {np.sum(data[elem][0])}")
+    print(f"{elem} - B layer sum: {np.sum(data[elem][1])}")
+    print(f"{elem} - C layer sum: {np.sum(data[elem][2])}")
+    print(f"{elem} - D layer sum: {np.sum(data[elem][3])}")
+    print(f"{elem} - E layer sum: {np.sum(data[elem][4])}")
 
-input_layers = np.stack([data[elem] for elem in input_elements], axis=0)
+output_elements = ['Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
+
 output_layers = np.stack([data[elem] for elem in output_elements], axis=0)
+# Size of output_layers: (5, 5, 60, 60)
 
-# Normalize the data
-# input_layers = (input_layers - input_layers.mean()) / input_layers.std()
-# output_layers = (output_layers - output_layers.mean()) / output_layers.std()
+batch_size = 1
+sequence_length_output = 5 * 5
 
-print("Initial input layers shape:", input_layers.shape)
-print("Initial output layers shape:", output_layers.shape)
+output_layers_with_batch = np.reshape(output_layers, (batch_size, 5, 5, 60, 60))
+# Size of output_layers_with_batch: (1, 5, 5, 60, 60)
 
-# Reshape the input and output to be 3D: (batch_size, sequence_length, feature_dimension)
-batch_size = input_layers.shape[0]
-sequence_length = input_layers.shape[1]
-feature_dimension = grid_size * grid_size
+output_layers_processed = output_layers_with_batch.reshape(batch_size, sequence_length_output, grid_size * grid_size)
+# Size of output_layers_processed: (1, 25, 3600)
 
-input_layers = input_layers.reshape(batch_size, sequence_length, feature_dimension)
-output_layers = output_layers.reshape(batch_size, sequence_length, feature_dimension)
+# Convert to PyTorch tensors
+output_tensor_train = torch.tensor(output_layers_processed, dtype=torch.float32)
+input_tensor_train = torch.zeros_like(output_tensor_train)
+# Size of input_tensor_train: torch.Size([1, 25, 3600])
+# Size of output_tensor_train: torch.Size([1, 25, 3600])
+print(input_tensor_train.shape)
+print(output_tensor_train.shape)
 
-print("Reshaped input layers shape:", input_layers.shape)
-print("Reshaped output layers shape:", output_layers.shape)
-
-# Create train/validation mask
-total_cells = grid_size * grid_size
-
-if use_sticky_markov:
-    mask = generate_sticky_markov_mask(grid_size)
-    train_mask = mask
-    val_mask = ~mask
-else:
-    indices = np.arange(total_cells)
-    np.random.shuffle(indices)
-    train_indices = indices[:int(0.7 * total_cells)]
-    val_indices = indices[int(0.7 * total_cells):]
-
-    train_mask = np.zeros(total_cells, dtype=bool)
-    train_mask[train_indices] = True
-    val_mask = ~train_mask
-
-input_train = np.zeros_like(input_layers)
-output_train = np.zeros_like(output_layers)
-input_val = np.zeros_like(input_layers)
-output_val = np.zeros_like(output_layers)
-
-if use_validation:
-    input_train[:, :, train_mask] = input_layers[:, :, train_mask]
-    output_train[:, :, train_mask] = output_layers[:, :, train_mask]
-    input_val[:, :, val_mask] = input_layers[:, :, val_mask]
-    output_val[:, :, val_mask] = output_layers[:, :, val_mask]
-else:
-    input_train = input_layers
-    output_train = output_layers
-
-input_tensor_train = torch.tensor(input_train, dtype=torch.float32)
-output_tensor_train = torch.tensor(output_train, dtype=torch.float32)
-
-if use_validation:
-    input_tensor_val = torch.tensor(input_val, dtype=torch.float32)
-    output_tensor_val = torch.tensor(output_val, dtype=torch.float32)
-
-print("Train input tensor shape:", input_tensor_train.shape)
-print("Train output tensor shape:", output_tensor_train.shape)
-if use_validation:
-    print("Val input tensor shape:", input_tensor_val.shape)
-    print("Val output tensor shape:", output_tensor_val.shape)
-
+# Initialize model and train
 model = MineralTransformer(d_model=d_model)
-
-def train(model, input_tensor_train, output_tensor_train, input_tensor_val=None, output_tensor_val=None, train_mask=None, val_mask=None, num_epochs=100, learning_rate=0.0001, weight_decay=1e-5):
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    criterion = nn.MSELoss()
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True)
-
-    if train_mask is not None:
-        train_mask = torch.tensor(train_mask, dtype=torch.bool).reshape(-1)
-    if val_mask is not None:
-        val_mask = torch.tensor(val_mask, dtype=torch.bool).reshape(-1)
-
-    for epoch in range(num_epochs):
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(input_tensor_train, output_tensor_train)
-        if train_mask is not None:
-            loss = criterion(outputs.view(-1, grid_size * grid_size)[:, train_mask], output_tensor_train.view(-1, grid_size * grid_size)[:, train_mask])
-        else:
-            loss = criterion(outputs.view(-1, grid_size * grid_size), output_tensor_train.view(-1, grid_size * grid_size))
-        loss.backward()
-        # nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
-        optimizer.step()
-
-        if use_validation:
-            model.eval()
-            with torch.no_grad():
-                val_outputs = model(input_tensor_val, output_tensor_val)
-                if val_mask is not None:
-                    val_loss = criterion(val_outputs.view(-1, grid_size * grid_size)[:, val_mask], output_tensor_val.view(-1, grid_size * grid_size)[:, val_mask])
-                else:
-                    val_loss = criterion(val_outputs.view(-1, grid_size * grid_size), output_tensor_val.view(-1, grid_size * grid_size))
-            print(f'Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}, Val Loss: {val_loss.item()}')
-            # scheduler.step(val_loss)
-        else:
-            print(f'Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}')
-
-if use_validation:
-    train(model, input_tensor_train, output_tensor_train, input_tensor_val, output_tensor_val, train_mask, val_mask)
-else:
-    train(model, input_tensor_train, output_tensor_train)
-
-output_dir = 'trainingVis'
-os.makedirs(output_dir, exist_ok=True)
-
-layer_colors = ['red', 'orange', 'yellow', 'blue', 'green']
-layer_names = ['Layer A', 'Layer B', 'Layer C', 'Layer D', 'Layer E']
-alpha_values = [1.0, 1.0, 0.9, 0.8, 0.8]
-
-def get_combined_layer(data, end_layer):
-    combined_layer = np.sum(data[:end_layer+1], axis=0)
-    return combined_layer
+train(model, input_tensor_train, output_tensor_train, num_epochs=30000, learning_rate=0.001)
 
 model.eval()
 with torch.no_grad():
-    predicted_output_train = model(input_tensor_train, output_tensor_train)
-    if use_validation:
-        predicted_output_val = model(input_tensor_val, output_tensor_val)
+    predicted_output_train, _ = model(input_tensor_train, output_tensor_train)
 
-input_np_train = input_tensor_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
-output_np_train = output_tensor_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
-predicted_np_train = predicted_output_train.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
+# Reshape tensors back to the original shape for visualization and metric computation
+output_np_train = output_tensor_train.numpy().reshape(batch_size, 5, 5, grid_size, grid_size)
+predicted_np_train = predicted_output_train.numpy().reshape(batch_size, 5, 5, grid_size, grid_size)
 
-if use_validation:
-    input_np_val = input_tensor_val.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
-    output_np_val = output_tensor_val.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
-    predicted_np_val = predicted_output_val.numpy().reshape(batch_size, sequence_length, grid_size, grid_size)
+flattened_output_np_train = output_np_train.reshape(batch_size, 5, 5, -1)
+flattened_predicted_np_train = predicted_np_train.reshape(batch_size, 5, 5, -1)
+# (1, 5, 5, 3600)
 
-# Gaussian smoothing
-smoothed_predicted_np_train = gaussian_smooth_and_normalize(predicted_np_train[0])
-smoothed_output_np_train = gaussian_smooth_and_normalize(output_np_train[0])
-smoothed_input_np_train = gaussian_smooth_and_normalize(input_np_train[0])
-
-if use_validation:
-    smoothed_predicted_np_val = gaussian_smooth_and_normalize(predicted_np_val[0])
-    smoothed_output_np_val = gaussian_smooth_and_normalize(output_np_val[0])
-    smoothed_input_np_val = gaussian_smooth_and_normalize(input_np_val[0])
-
-# Visualization
-def visualize_layers(layers, title, cmap='viridis'):
-    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-    for i, ax in enumerate(axes):
-        im = ax.imshow(layers[i], cmap=cmap)
-        ax.set_title(f'Layer {chr(65+i)}')
-        plt.colorbar(im, ax=ax)
-    fig.suptitle(title)
-    plt.show()
-
-visualize_layers(input_np_train[0], 'Train Original Gold Layers (Input)')
-visualize_layers(output_np_train[0], 'Train Original Silver Layers (Output)')
-visualize_layers(predicted_np_train[0], 'Train Predicted Silver Layers (Output)')
-
-if use_validation:
-    visualize_layers(input_np_val[0], 'Val Original Gold Layers (Input)')
-    visualize_layers(output_np_val[0], 'Val Original Silver Layers (Output)')
-    visualize_layers(predicted_np_val[0], 'Val Predicted Silver Layers (Output)')
-
-fig, axes = plt.subplots(5, 4, figsize=(20, 25))
-
-titles = ['Train Original Silver', 'Train Predicted Silver']
-data_sets = [output_np_train[0], predicted_np_train[0]]
-
-if use_validation:
-    titles += ['Val Original Silver', 'Val Predicted Silver']
-    data_sets += [output_np_val[0], predicted_np_val[0]]
-
-row_colors = ['blue'] + ['black'] * 4
-
-if same_scale:
-    vmin = min(output_np_train.min(), predicted_np_train.min(), (output_np_val.min() if use_validation else float('inf')), (predicted_np_val.min() if use_validation else float('inf')))
-    vmax = max(output_np_train.max(), predicted_np_train.max(), (output_np_val.max() if use_validation else float('-inf')), (predicted_np_val.max() if use_validation else float('-inf')))
-
+# Logging metric values to wandb
+metric_values = []
 for i in range(5):
-    for ax, data, title in zip(axes[i], data_sets, titles):
-        if same_scale:
-            im = ax.imshow(data[i], cmap='viridis', vmin=vmin, vmax=vmax)
-        else:
-            im = ax.imshow(data[i], cmap='viridis')
-        ax.set_title(f'{title} Layer {chr(65+i)}')
-        plt.colorbar(im, ax=ax)
-        ax.spines['top'].set_color(row_colors[i])
-        ax.spines['bottom'].set_color(row_colors[i])
-        ax.spines['left'].set_color(row_colors[i])
-        ax.spines['right'].set_color(row_colors[i])
-
-plt.savefig(os.path.join(output_dir, 'SM_NOVAL_comparison_all_predicted_silver_layers.png'))
-plt.show()
-
-# Calculate the metric: integrated number of resources predicted in a layer / total ground truth number of resources at that layer
-for i in range(5):
-    # pdb.set_trace()
-    predicted_sum = np.sum(predicted_np_train[0][i])
-    ground_truth_sum = np.sum(output_np_train[0][i])
-    metric = predicted_sum / ground_truth_sum
+    predicted_sum = np.sum(flattened_predicted_np_train[0, :, i, :])
+    ground_truth_sum = np.sum(flattened_output_np_train[0, :, i, :])
+    metric = predicted_sum / (ground_truth_sum + 1e-8)
+    metric_values.append(metric)
+    wandb.log({f'Layer_{chr(65+i)}_Metric': metric})
     print(f'Layer {chr(65+i)}: Metric = {metric}')
 
+plot_metric(metric_values, [chr(65+i) for i in range(5)])
+wandb.save('metric_plot.png')  # Save the plot to wandb
 
+# VIS
+input_elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper']
+output_elements = ['Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
 
+for i in range(5):  # By quality
+    visualize_layers(i, np.zeros_like(output_np_train[0]), output_np_train[0], predicted_np_train[0], input_elements, output_elements)
 
-# def visualize_layers(layers, title, cmap='viridis'):
-#     fig, axes = plt.subplots(1, 5, figsize=(20, 4))
-#     for i, ax in enumerate(axes):
-#         im = ax.imshow(layers[i], cmap=cmap)
-#         ax.set_title(f'Layer {chr(65+i)}')
-#         plt.colorbar(im, ax=ax)
-#     fig.suptitle(title)
-#     plt.show()
+# Dice coefficients for each layer in the US
+dice_coeffs = compute_dice_coefficients(flattened_predicted_np_train[0], flattened_output_np_train[0], threshold=0)
+plot_dice_coefficients(dice_coeffs, output_elements)
+wandb.save('dice_coefficients_plot.png')  # Save the plot to wandb
 
-
-# visualize_layers(input_np_train[0], 'Train Original Gold Layers (Input)')
-# visualize_layers(output_np_train[0], 'Train Original Silver Layers (Output)')
-# visualize_layers(predicted_np_train[0], 'Train Predicted Silver Layers (Output)')
-
-# visualize_layers(input_np_val[0], 'Val Original Gold Layers (Input)')
-# visualize_layers(output_np_val[0], 'Val Original Silver Layers (Output)')
-# visualize_layers(predicted_np_val[0], 'Val Predicted Silver Layers (Output)')
-
-# # Set the color limits to be the same for all plots
-# vmin = min(output_np_train.min(), predicted_np_train.min(), output_np_val.min(), predicted_np_val.min())
-# vmax = max(output_np_train.max(), predicted_np_train.max(), output_np_val.max(), predicted_np_val.max())
-
-# fig, axes = plt.subplots(5, 4, figsize=(20, 25))
-
-# titles = ['Train Original Silver', 'Train Predicted Silver', 'Val Original Silver', 'Val Predicted Silver']
-# data_sets = [output_np_train[0], predicted_np_train[0], output_np_val[0], predicted_np_val[0]]
-# row_colors = ['blue'] + ['black'] * 4
-
-# for i in range(5):
-#     for ax, data, title in zip(axes[i], data_sets, titles):
-#         im = ax.imshow(data[i], cmap='viridis', vmin=vmin, vmax=vmax)
-#         ax.set_title(f'{title} Layer {chr(65+i)}')
-#         plt.colorbar(im, ax=ax)
-#         ax.spines['top'].set_color(row_colors[i])
-#         ax.spines['bottom'].set_color(row_colors[i])
-#         ax.spines['left'].set_color(row_colors[i])
-#         ax.spines['right'].set_color(row_colors[i])
-
-# plt.savefig(os.path.join(output_dir, 'SM_comparison_all_predicted_silver_layers.png'))
-# plt.show()
+# Finish the wandb run
+wandb.finish()
 
 
 ''' OLD CONTOUR PLOTTING
@@ -360,62 +199,5 @@ labels = layer_names
 axes[1, -1].legend(handles, labels, loc='upper right', bbox_to_anchor=(1.15, 1))
 
 plt.savefig(os.path.join(output_dir, f'{input_elements[0]}_to_{output_elements[0]}_contour_stacked_comparison_all_layers.png'))
-plt.show()
-'''
-
-
-''' Try to fill in contour plots
-layer_colors_bgr = [(0, 0, 255), (0, 165, 255), (0, 255, 255), (255, 0, 0), (0, 255, 0)]
-layer_colors_rgb = [(255, 0, 0), (255, 165, 0), (255, 255, 0), (0, 0, 255), (0, 255, 0)]
-layer_names = ['Layer A', 'Layer B', 'Layer C', 'Layer D', 'Layer E']
-
-output_dir = 'trainingVis'
-os.makedirs(output_dir, exist_ok=True)
-
-def fill_contours(data, color):
-    img = np.zeros((data.shape[0], data.shape[1], 3), dtype=np.uint8)
-    norm_data = cv2.normalize(data, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    contours, _ = cv2.findContours(norm_data, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(img, contours, -1, color, thickness=cv2.FILLED)
-    return img
-
-def create_filled_contour_images(layers):
-    combined_img = np.zeros((layers.shape[1], layers.shape[2], 3), dtype=np.uint8)
-    for i in reversed(range(5)):  # Plot E (bottom) to A (top)
-        filled_img = fill_contours(layers[i], layer_colors_bgr[i])
-        mask = filled_img.any(axis=-1)
-        combined_img[mask] = filled_img[mask]
-    return combined_img
-
-fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-
-original_images = [
-    create_filled_contour_images(input_np[0]),
-    create_filled_contour_images(output_np[0]),
-    create_filled_contour_images(predicted_np[0])
-]
-
-for ax, img, title in zip(axes[0], original_images, ['Gold Layer', 'Original Silver Layer', 'Predicted Silver Layer']):
-    ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    ax.set_title(title)
-    ax.axis('off')
-
-smoothed_images = [
-    create_filled_contour_images(smoothed_input_np),
-    create_filled_contour_images(smoothed_output_np),
-    create_filled_contour_images(smoothed_predicted_np)
-]
-
-for ax, img, title in zip(axes[1], smoothed_images, ['Smoothed Gold Layer', 'Smoothed Silver Layer', 'Smoothed Predicted Silver Layer']):
-    ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    ax.set_title(title)
-    ax.axis('off')
-
-handles = [plt.Line2D([0, 1], [0, 1], color=np.array(color)/255, lw=4) for color in layer_colors_rgb]
-labels = layer_names
-
-axes[1, -1].legend(handles, labels, loc='upper right', bbox_to_anchor=(1.15, 1))
-
-plt.savefig(os.path.join(output_dir, 'contourf_stacked_comparison_all_layers.png'))
 plt.show()
 '''

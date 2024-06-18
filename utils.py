@@ -1,8 +1,12 @@
 import os
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 
 from scipy.ndimage import gaussian_filter
+
+def weighted_mse_loss(pred, target, weight):
+    return torch.mean(weight * (pred - target) ** 2)
 
 def plot_metric(metric_values, layers):
     x = np.arange(len(layers))
@@ -51,7 +55,7 @@ def visualize_layers(layer_index, input_data, output_data, predicted_data, input
     fig.suptitle(f'Comparison for Quality Layer {chr(65+layer_index)}', fontsize=16)
     plt.savefig(os.path.join('trainingVis', f'comparison_layer_{chr(65+layer_index)}.png'))
     plt.show()
-    
+
 def calculate_dice_coefficient(pred, gt, threshold=0.05):
     pred_binary = pred > threshold
     gt_binary = gt > threshold
@@ -64,7 +68,7 @@ def calculate_dice_coefficient(pred, gt, threshold=0.05):
     return dice
 
 
-def compute_dice_coefficients(smoothed_predicted_np_train, smoothed_output_np_train, threshold=0.05):
+def compute_dice_coefficients(smoothed_predicted_np_train, smoothed_output_np_train, threshold=0.05): # TUNE
     dice_coeffs = {}
     
     for layer_index in range(5):

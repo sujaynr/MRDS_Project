@@ -4,9 +4,9 @@ import pdb
 
 grid_size = 60
 
-class SimplestMineralTransformer(nn.Module):
+class MineralTransformer(nn.Module):
     def __init__(self, d_model=128, nhead=4, num_encoder_layers=2, num_decoder_layers=2, dim_feedforward=512, dropout=0.1):
-        super(SimplestMineralTransformer, self).__init__()
+        super(MineralTransformer, self).__init__()
         self.input_projection = nn.Linear(grid_size * grid_size, d_model)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation='relu', batch_first=True)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_encoder_layers)
