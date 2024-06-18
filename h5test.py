@@ -1,88 +1,53 @@
-import h5py
-import numpy as np
-import matplotlib.pyplot as plt
 import os
-import geopandas as gpd
-from shapely.geometry import box
+import h5py
 
-# File paths
-h5_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/mineral_data.h5'
-shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
+import matplotlib.pyplot as plt
 
-# Function to load HDF5 file and print information
-def load_and_print_h5_info(h5_file_path):
-    with h5py.File(h5_file_path, 'r') as f:
-        print("HDF5 file structure:")
-        f.visit(print)
+h5_file_path = '/Users/sujaynair/Documents/MRDS_Project/prepared_data_TILES/mineral_data.h5'
+output_dir = '/Users/sujaynair/Documents/MRDS_Project/tilingVIS'
 
-        # Print dataset shapes
-        counts_shape = f['counts'].shape
-        qualities_shape = f['qualities'].shape
-        print(f"\nShape of 'counts' dataset: {counts_shape}")
-        print(f"Shape of 'qualities' dataset: {qualities_shape}")
+# Function to recursively print the structure of the HDF5 file
+def print_structure(name, obj):
+    print(name)
+    if isinstance(obj, h5py.Dataset):
+        print(f"{name} - Dataset with shape {obj.shape} and dtype {obj.dtype}")
+    elif isinstance(obj, h5py.Group):
+        print(f"{name} - Group with {len(obj)} members")
 
-        # Print dataset stats
-        counts_data = f['counts'][:]
-        qualities_data = f['qualities'][:]
-        print(f"\nCounts dataset min: {np.min(counts_data)}, max: {np.max(counts_data)}, mean: {np.mean(counts_data)}")
-        print(f"Qualities dataset min: {np.min(qualities_data)}, max: {np.max(qualities_data)}, mean: {np.mean(qualities_data)}")
-
-        return counts_data, qualities_data
-
-# Function to visualize the counts and qualities for a specific square
-def visualize_square_data(counts_data, qualities_data, square_index, minerals, us_shape):
-    fig, axs = plt.subplots(2, len(minerals), figsize=(20, 10))
-
-    for i, mineral in enumerate(minerals):
-        # Visualize counts
-        counts = counts_data[square_index, i, :, :]
-        axs[0, i].imshow(counts, cmap='hot', interpolation='nearest')
-        axs[0, i].set_title(f"{mineral} Counts")
-        axs[0, i].axis('off')
-
-        # Visualize qualities
-        qualities = qualities_data[square_index, i, :, :]
-        axs[1, i].imshow(qualities, cmap='cool', interpolation='nearest')
-        axs[1, i].set_title(f"{mineral} Qualities")
-        axs[1, i].axis('off')
-
-    plt.tight_layout()
-    plt.show()
-
-# Function to visualize the locations of all squares on the US map
-def visualize_all_squares(us_shape, squares):
-    fig, ax = plt.subplots(figsize=(15, 10))
-    us_shape.boundary.plot(ax=ax, color='black')
-
-    for square in squares:
-        lat_start, lon_start = square
-        square_geom = box(lon_start, lat_start, lon_start + 50, lat_start + 50)
-        gpd.GeoSeries([square_geom]).boundary.plot(ax=ax, color='red')
-
-    plt.title("Locations of All Squares Overlaying the US")
-    plt.show()
-
-# Main script
-if __name__ == "__main__":
-    print("Loading HDF5 file and printing information...")
-    counts_data, qualities_data = load_and_print_h5_info(h5_file_path)
-
-    # Load the shapefile
-    print("Loading shapefile...")
-    us_shapefile = gpd.read_file(shapefile_path)
-    us_shape = us_shapefile[us_shapefile['ADMIN'] == 'United States of America']
-
-    # Define minerals and squares (you might need to pass squares if they are not stored)
-    minerals = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
+# Load the HDF5 file
+with h5py.File(h5_file_path, 'r') as data:
+    data.visititems(print_structure)
     
-    # Visualize data for a specific square (example: first square)
-    square_index = 0
-    print(f"Visualizing data for square {square_index}...")
-    visualize_square_data(counts_data, qualities_data, square_index, minerals, us_shape)
+    # Access the 'counts' dataset
+    counts = data['counts']
+    qualities = data['qualities']
+    
+    # Print details of the datasets
+    print(f"\n'counts' dataset shape: {counts.shape}, dtype: {counts.dtype}")
+    print(f"'qualities' dataset shape: {qualities.shape}, dtype: {qualities.dtype}")
+    
+    # Visualize all 20 slices of mineral 1
+    num_slices = 20  # Number of slices to visualize
+    mineral_index = 0  # Index of the mineral to visualize
 
-    # Visualize all squares on the US map
-    # You will need to recreate or load the square coordinates used in your previous script
-    # Example squares coordinates, replace this with actual data
-    squares = [(24.396308, -125.0), (35.0, -90.0), (40.0, -75.0)]  # Example coordinates
-    print("Visualizing all squares on the US map...")
-    visualize_all_squares(us_shape, squares)
+    for i in range(num_slices):
+        # Create a new figure for each slice
+        fig, axs = plt.subplots(1, 2, figsize=(15, 5))
+
+        # Plot the counts
+        im1 = axs[0].imshow(counts[i, mineral_index, :, :], cmap='viridis')
+        axs[0].set_title(f'Counts - Slice {i+1}, Mineral 1')
+        fig.colorbar(im1, ax=axs[0])
+        
+        # Plot the qualities
+        im2 = axs[1].imshow(qualities[i, mineral_index, :, :], cmap='plasma')
+        axs[1].set_title(f'Qualities - Slice {i+1}, Mineral 1')
+        fig.colorbar(im2, ax=axs[1])
+    
+        plt.tight_layout()
+        
+        # Save the figure in the output directory
+        output_path = os.path.join(output_dir, f'slice_{i+1}.png')
+        plt.savefig(output_path)
+        
+        plt.show()

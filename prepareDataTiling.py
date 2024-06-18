@@ -7,8 +7,8 @@ from shapely.geometry import Point, box
 import matplotlib.pyplot as plt
 
 # File paths
-file_path = '/home/sujaynair/mrds.csv'
-shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
+file_path = '/Users/sujaynair/Documents/mrds-csv/mrds.csv'
+shapefile_path = '/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_admin_0_countries.shp'
 data_dir = 'prepared_data_TILES'
 h5_file_path = os.path.join(data_dir, 'mineral_data.h5')
 
@@ -24,6 +24,24 @@ us_shape = us_shapefile[us_shapefile['ADMIN'] == 'United States of America']
 def is_within_us(lat, lon, us_shape):
     point = Point(lon, lat)
     return us_shape.contains(point).any()
+
+# Convert miles to degrees latitude and longitude
+def miles_to_degrees_lat(miles):
+    return miles / 69.0
+
+def miles_to_degrees_lon(miles, latitude):
+    return miles / (69.0 * np.cos(np.radians(latitude)))
+
+def is_square_within_us(lat_start, lon_start, us_shape, side_length_miles=50):
+    lat_length = miles_to_degrees_lat(side_length_miles)
+    lon_length = miles_to_degrees_lon(side_length_miles, lat_start)
+    points = [
+        Point(lon_start, lat_start),
+        Point(lon_start + lon_length, lat_start),
+        Point(lon_start, lat_start + lat_length),
+        Point(lon_start + lon_length, lat_start + lat_length)
+    ]
+    return all(us_shape.contains(point).any() for point in points)
 
 print("Loading and processing the mineral dataset...")
 # Load the mineral dataset
@@ -47,13 +65,13 @@ mineral_counts = df['commodities'].value_counts()
 valid_minerals = mineral_counts[mineral_counts >= 1000].index
 df = df[df['commodities'].isin(valid_minerals)]
 
-# Generate random squares within the US
+# Generate random 50-mile by 50-mile squares within the US
 def generate_random_squares(num_squares, us_shape):
     squares = []
     while len(squares) < num_squares:
         lat = np.random.uniform(24.396308, 49.384358)  # US lat range
         lon = np.random.uniform(-125.0, -66.93457)  # US lon range
-        if is_within_us(lat, lon, us_shape):
+        if is_square_within_us(lat, lon, us_shape):
             squares.append((lat, lon))
     return squares
 
@@ -62,18 +80,16 @@ def fill_cells(df, square, grid_size=50, cell_size=1):
     lat_start, lon_start = square
     minerals = df['commodities'].unique()
     cell_counts = np.zeros((len(minerals), grid_size, grid_size))
-    cell_qualities = np.zeros((len(minerals), grid_size, grid_size))
+    cell_qualities = np.full((len(minerals), grid_size, grid_size), np.nan)
 
     mineral_map = {mineral: idx for idx, mineral in enumerate(minerals)}
 
     for i in range(grid_size):
         for j in range(grid_size):
-            lat_min = lat_start + i * cell_size
-            lat_max = lat_start + (i + 1) * cell_size
-            lon_min = lon_start + j * cell_size
-            lon_max = lon_start + (j + 1) * cell_size
-
-            print(f"Processing cell bounds: lat_min={lat_min}, lat_max={lat_max}, lon_min={lon_min}, lon_max={lon_max}")
+            lat_min = lat_start + i * miles_to_degrees_lat(cell_size)
+            lat_max = lat_start + (i + 1) * miles_to_degrees_lat(cell_size)
+            lon_min = lon_start + j * miles_to_degrees_lon(cell_size, lat_start)
+            lon_max = lon_start + (j + 1) * miles_to_degrees_lon(cell_size, lat_start)
 
             cell_data = df[
                 (df['latitude'] >= lat_min) & (df['latitude'] < lat_max) &
@@ -82,11 +98,10 @@ def fill_cells(df, square, grid_size=50, cell_size=1):
 
             for mineral in minerals:
                 mineral_data = cell_data[cell_data['commodities'] == mineral]
-                cell_counts[mineral_map[mineral], i, j] = len(mineral_data)
-                if len(mineral_data) > 0:
+                count = len(mineral_data)
+                cell_counts[mineral_map[mineral], i, j] = count
+                if count > 0:
                     cell_qualities[mineral_map[mineral], i, j] = np.mean(mineral_data['score'].map({'A': 5, 'B': 4, 'C': 3, 'D': 2, 'E': 1}))
-
-                print(f"Mineral: {mineral}, Count: {cell_counts[mineral_map[mineral], i, j]}, Quality: {cell_qualities[mineral_map[mineral], i, j]}")
 
     return cell_counts, cell_qualities
 
@@ -115,7 +130,7 @@ def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
     return squares
 
 # Create the HDF5 file
-squares = create_hdf5_file(h5_file_path, df, num_squares=10)
+squares = create_hdf5_file(h5_file_path, df, num_squares=20)
 
 print("Data preparation completed.")
 
@@ -126,7 +141,7 @@ def visualize_squares(squares, us_shape):
     
     for square in squares:
         lat_start, lon_start = square
-        square_geom = box(lon_start, lat_start, lon_start + 50, lat_start + 50)
+        square_geom = box(lon_start, lat_start, lon_start + miles_to_degrees_lon(50, lat_start), lat_start + miles_to_degrees_lat(50))
         gpd.GeoSeries([square_geom]).boundary.plot(ax=ax, color='red')
     
     plt.title("Randomly Generated Squares Overlaying the US")
