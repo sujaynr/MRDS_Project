@@ -1,5 +1,6 @@
 import wandb
 import os
+import pdb
 import h5py
 import numpy as np
 import torch
@@ -12,7 +13,7 @@ from utils import visualize_layers, compute_dice_coefficients, plot_dice_coeffic
 
 # Initialize wandb
 wandb.init(project="mineral_transformer_project", name="2048_0.0001TEST")
-
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 grid_size = 50
 d_model = 256
 num_minerals = 10  # Based on the provided details
@@ -63,6 +64,8 @@ def train(model, train_loader, num_epochs=500, learning_rate=0.001):
         model.train()
         total_loss = 0
         for input_tensor_train, output_tensor_train in train_loader:
+            input_tensor_train = input_tensor_train.to(device) 
+            output_tensor_train = output_tensor_train.to(device) 
             optimizer.zero_grad()
             outputs = model(input_tensor_train, output_tensor_train)
 
@@ -116,7 +119,8 @@ test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
 
 # Initialize model and train
 model = MineralTransformer(d_model=d_model)
-train(model, train_loader, num_epochs=20, learning_rate=0.0001)
+model = model.to(device) 
+train(model, train_loader, num_epochs=100, learning_rate=0.0001)
 
 model.eval()
 predicted_output_test = []
@@ -124,17 +128,20 @@ output_tensor_test = []
 
 with torch.no_grad():
     for input_tensor_test, output_tensor in test_loader:
+        print(input_tensor_test.shape, output_tensor.shape)
+        input_tensor_test = input_tensor_test.to(device)
+        output_tensor = output_tensor.to(device)
         predicted_output_test.append(model(input_tensor_test, output_tensor))
         output_tensor_test.append(output_tensor)
 
 # Concatenate results
 predicted_output_test = torch.cat(predicted_output_test, dim=0)
 output_tensor_test = torch.cat(output_tensor_test, dim=0)
-
+# pdb.set_trace()
 # Reshape tensors back to the original shape for visualization and metric computation
 batch_size = predicted_output_test.shape[0]
-predicted_np_test = predicted_output_test.numpy().reshape(batch_size, 1, grid_size, grid_size)
-output_np_test = output_tensor_test.numpy()
+predicted_np_test = predicted_output_test.cpu().numpy().reshape(batch_size, 1, grid_size, grid_size)
+output_np_test = output_tensor_test.cpu().numpy()
 
 flattened_output_np_test = output_np_test.reshape(batch_size, 1, -1)
 flattened_predicted_np_test = predicted_np_test.reshape(batch_size, 1, -1)
@@ -163,6 +170,21 @@ def visualize_predictions(predicted, ground_truth, idx):
 # Visualize a few samples from the test set
 for i in range(5):
     visualize_predictions(predicted_np_test, output_np_test, i)
+
+# Save the visualizations to the "tilingVIs" folder
+if not os.path.exists("tilingVIS"):
+    os.makedirs("tilingVIS")
+
+for i in range(5):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(predicted_np_test[i, 0, :, :], cmap='viridis')
+    axes[0].set_title('Predicted Nickel')
+    axes[1].imshow(output_np_test[i, 0, :, :], cmap='viridis')
+    axes[1].set_title('Ground Truth Nickel')
+    plt.savefig(f"tilingVIS/sample_{i}.png")
+    plt.close()
+
+print("Visualizations saved in the 'tilingVIS' folder.")
 
 # Finish the wandb run
 wandb.finish()
