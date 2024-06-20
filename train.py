@@ -1,5 +1,173 @@
 import wandb
 import os
+import pdb
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from models import MineralTransformer, SimpleMineralTransformer
+from utils import visualize_layers, compute_dice_coefficients, plot_dice_coefficients, plot_metric, weighted_mse_loss
+
+# Initialize wandb
+wandb.init(project="mineral_transformer_project", name="2048_0.0001TEST")
+
+grid_size = 50
+d_model = 256
+num_minerals = 10  # Based on the provided details
+
+class MineralDataset(Dataset):
+    def __init__(self, h5_file_path, input_minerals, output_mineral, train=True, train_size=0.8):
+        self.h5_file_path = h5_file_path
+        self.input_minerals = input_minerals
+        self.output_mineral = output_mineral
+        self.train = train
+        
+        with h5py.File(h5_file_path, 'r') as f:
+            counts = f['counts'][:]
+        
+        num_samples = counts.shape[0]
+        indices = np.arange(num_samples)
+        np.random.shuffle(indices)
+        
+        train_split = int(train_size * num_samples)
+        if self.train:
+            self.indices = indices[:train_split]
+        else:
+            self.indices = indices[train_split:]
+        
+        self.counts = counts
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        index = self.indices[idx]
+        input_data = self.counts[index, self.input_minerals, :, :]
+        output_data = self.counts[index, self.output_mineral:self.output_mineral+1, :, :]
+        return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32)
+losses = []
+def train(model, train_loader, num_epochs=500, learning_rate=0.001):
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for input_tensor_train, output_tensor_train in train_loader:
+            # pdb.set_trace()
+            optimizer.zero_grad()
+            outputs = model(input_tensor_train, output_tensor_train)
+
+            # Flatten for loss 
+            flat_outputs = outputs.view(outputs.size(0), -1)
+            flat_output_tensor_train = output_tensor_train.view(output_tensor_train.size(0), -1)
+
+            loss = criterion(flat_outputs, flat_output_tensor_train)
+            loss.backward()
+
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        avg_loss = total_loss / len(train_loader)
+        losses.append(avg_loss)
+        wandb.log({"Loss": avg_loss})
+
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss}')
+
+    plt.plot(losses, label='Loss')
+    plt.title('Training Loss Curve')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig('trainingVis/loss_curve.png')
+    plt.close()
+
+    wandb.save('trainingVis/loss_curve.png')
+
+def load_data(h5_file_path):
+    with h5py.File(h5_file_path, 'r') as f:
+        counts = f['counts'][:]
+        qualities = f['qualities'][:]
+    return counts, qualities
+
+# Load data from HDF5 file
+h5_file_path = 'prepared_data_TILES/mineral_data.h5'
+
+# Select input minerals (excluding Nickel) and output mineral (Nickel)
+input_minerals = [0, 1, 2, 3, 4, 6, 7, 8, 9]  # Indices for Gold, Silver, Zinc, Lead, Copper, Iron, Uranium, Tungsten, Manganese
+output_mineral = 5  # Index for Nickel
+
+# Create Dataset and DataLoader
+train_dataset = MineralDataset(h5_file_path, input_minerals, output_mineral, train=True)
+test_dataset = MineralDataset(h5_file_path, input_minerals, output_mineral, train=False)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
+
+# Initialize model and train
+model = MineralTransformer(d_model=d_model)
+train(model, train_loader, num_epochs=20, learning_rate=0.0001)
+
+model.eval()
+predicted_output_test = []
+output_tensor_test = []
+
+with torch.no_grad():
+    for input_tensor_test, output_tensor in test_loader:
+        predicted_output_test.append(model(input_tensor_test, output_tensor))
+        output_tensor_test.append(output_tensor)
+
+# Concatenate results
+predicted_output_test = torch.cat(predicted_output_test, dim=0)
+output_tensor_test = torch.cat(output_tensor_test, dim=0)
+
+# Reshape tensors back to the original shape for visualization and metric computation
+batch_size = predicted_output_test.shape[0]
+predicted_np_test = predicted_output_test.numpy().reshape(batch_size, 1, grid_size, grid_size)
+output_np_test = output_tensor_test.numpy()
+
+flattened_output_np_test = output_np_test.reshape(batch_size, 1, -1)
+flattened_predicted_np_test = predicted_np_test.reshape(batch_size, 1, -1)
+
+# Logging metric values to wandb
+metric_values = []
+predicted_sum = np.sum(flattened_predicted_np_test[0, 0, :])
+ground_truth_sum = np.sum(flattened_output_np_test[0, 0, :])
+metric = predicted_sum / (ground_truth_sum + 1e-8)
+metric_values.append(metric)
+wandb.log({f'Nickel_Metric': metric})
+print(f'Nickel: Metric = {metric}')
+
+plot_metric(metric_values, ['Nickel'])
+wandb.save('metric_plot.png')  # Save the plot to wandb
+
+# VIS
+input_elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
+output_element = 'Nickel'
+
+visualize_layers(0, np.zeros_like(output_np_test[0]), output_np_test[0], predicted_np_test[0], input_elements, [output_element])
+
+# Dice coefficients for Nickel in the US
+dice_coeffs = compute_dice_coefficients(flattened_predicted_np_test[0], flattened_output_np_test[0], threshold=0)
+plot_dice_coefficients(dice_coeffs, [output_element])
+wandb.save('dice_coefficients_plot.png')  # Save the plot to wandb
+
+# Finish the wandb run
+wandb.finish()
+
+
+
+
+
+
+''' Memorization script
+import wandb
+import os
 import pickle
 import pdb
 import numpy as np
@@ -143,7 +311,7 @@ wandb.save('dice_coefficients_plot.png')  # Save the plot to wandb
 
 # Finish the wandb run
 wandb.finish()
-
+'''
 
 ''' OLD CONTOUR PLOTTING
 # Visualization code remains the same
