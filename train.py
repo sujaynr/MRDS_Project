@@ -1,6 +1,5 @@
 import wandb
 import os
-import pdb
 import h5py
 import numpy as np
 import torch
@@ -8,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from models import MineralTransformer, SimpleMineralTransformer
+from models import MineralTransformer
 from utils import visualize_layers, compute_dice_coefficients, plot_dice_coefficients, plot_metric, weighted_mse_loss
 
 # Initialize wandb
@@ -17,6 +16,7 @@ wandb.init(project="mineral_transformer_project", name="2048_0.0001TEST")
 grid_size = 50
 d_model = 256
 num_minerals = 10  # Based on the provided details
+mask_fraction = 0.1  # Fraction of cells to be masked
 
 class MineralDataset(Dataset):
     def __init__(self, h5_file_path, input_minerals, output_mineral, train=True, train_size=0.8):
@@ -45,10 +45,16 @@ class MineralDataset(Dataset):
 
     def __getitem__(self, idx):
         index = self.indices[idx]
-        input_data = self.counts[index, self.input_minerals, :, :]
-        output_data = self.counts[index, self.output_mineral:self.output_mineral+1, :, :]
+        input_data = self.counts[index].copy()
+        output_data = input_data[self.output_mineral:self.output_mineral+1, :, :]
+        
+        if self.train:
+            input_data[self.output_mineral, :, :] = 0  # Mask Nickel data
+        
         return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32)
+
 losses = []
+
 def train(model, train_loader, num_epochs=500, learning_rate=0.001):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
@@ -57,7 +63,6 @@ def train(model, train_loader, num_epochs=500, learning_rate=0.001):
         model.train()
         total_loss = 0
         for input_tensor_train, output_tensor_train in train_loader:
-            # pdb.set_trace()
             optimizer.zero_grad()
             outputs = model(input_tensor_train, output_tensor_train)
 
@@ -146,21 +151,21 @@ print(f'Nickel: Metric = {metric}')
 plot_metric(metric_values, ['Nickel'])
 wandb.save('metric_plot.png')  # Save the plot to wandb
 
-# VIS
-input_elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
-output_element = 'Nickel'
+# Enhanced Visualization
+def visualize_predictions(predicted, ground_truth, idx):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(predicted[idx, 0, :, :], cmap='viridis')
+    axes[0].set_title('Predicted Nickel')
+    axes[1].imshow(ground_truth[idx, 0, :, :], cmap='viridis')
+    axes[1].set_title('Ground Truth Nickel')
+    plt.show()
 
-visualize_layers(0, np.zeros_like(output_np_test[0]), output_np_test[0], predicted_np_test[0], input_elements, [output_element])
-
-# Dice coefficients for Nickel in the US
-dice_coeffs = compute_dice_coefficients(flattened_predicted_np_test[0], flattened_output_np_test[0], threshold=0)
-plot_dice_coefficients(dice_coeffs, [output_element])
-wandb.save('dice_coefficients_plot.png')  # Save the plot to wandb
+# Visualize a few samples from the test set
+for i in range(5):
+    visualize_predictions(predicted_np_test, output_np_test, i)
 
 # Finish the wandb run
 wandb.finish()
-
-
 
 
 
