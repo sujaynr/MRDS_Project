@@ -7,12 +7,10 @@ from shapely.geometry import Point, box
 import matplotlib.pyplot as plt
 
 # File paths
-# file_path = '/Users/sujaynair/Documents/mrds-csv/mrds.csv'
-# shapefile_path = '/Users/sujaynair/Downloads/ne_110m_admin_0_countries/ne_110m_admin_0_countries.shp'
 file_path = '/home/sujaynair/mrds.csv'
 shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
 data_dir = 'prepared_data_TILES'
-h5_file_path = os.path.join(data_dir, 'mineral_data.h5')
+h5_file_path = os.path.join(data_dir, 'NEmineral_data.h5')
 
 # Ensure data directory exists
 os.makedirs(data_dir, exist_ok=True)
@@ -67,14 +65,21 @@ mineral_counts = df['commodities'].value_counts()
 valid_minerals = mineral_counts[mineral_counts >= 1000].index
 df = df[df['commodities'].isin(valid_minerals)]
 
+# Ensure the mineral mapping is consistent with the required order
+mineral_map = {mineral: idx for idx, mineral in enumerate(['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese'])}
+
 # Generate random 50-mile by 50-mile squares within the US
-def generate_random_squares(num_squares, us_shape):
+def generate_random_squares(df, num_squares, us_shape):
     squares = []
     while len(squares) < num_squares:
         lat = np.random.uniform(24.396308, 49.384358)  # US lat range
         lon = np.random.uniform(-125.0, -66.93457)  # US lon range
         if is_square_within_us(lat, lon, us_shape):
-            squares.append((lat, lon))
+            counts, _ = fill_cells(df, (lat, lon))
+            if np.sum(counts) > 0:  # Check if the square is non-empty
+                squares.append((lat, lon))
+                # Check progress:
+                print(f"Generated {len(squares)} squares...")
     return squares
 
 # Function to fill in the cells for each square
@@ -83,8 +88,6 @@ def fill_cells(df, square, grid_size=50, cell_size=1):
     minerals = df['commodities'].unique()
     cell_counts = np.zeros((len(minerals), grid_size, grid_size))
     cell_qualities = np.full((len(minerals), grid_size, grid_size), np.nan)
-
-    mineral_map = {mineral: idx for idx, mineral in enumerate(minerals)}
 
     for i in range(grid_size):
         for j in range(grid_size):
@@ -110,7 +113,7 @@ def fill_cells(df, square, grid_size=50, cell_size=1):
 # Main function to create the HDF5 file
 def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
     print("Generating random squares...")
-    squares = generate_random_squares(num_squares, us_shape)
+    squares = generate_random_squares(df, num_squares, us_shape)
 
     minerals = df['commodities'].unique()
     num_minerals = len(minerals)
@@ -132,7 +135,7 @@ def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
     return squares
 
 # Create the HDF5 file
-squares = create_hdf5_file(h5_file_path, df, num_squares=2000)
+squares = create_hdf5_file(h5_file_path, df, num_squares=10000)
 
 print("Data preparation completed.")
 # Visualization
