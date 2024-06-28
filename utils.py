@@ -1,5 +1,6 @@
 import wandb
 import os
+import pdb
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -42,11 +43,15 @@ def plot_predictions(predicted, ground_truth, num_samples=20, save_path="predict
         fig.colorbar(im1, ax=axes[0])
         fig.colorbar(im2, ax=axes[1])
         
-        plt.savefig(f"{save_path}/LINTOCONVsample_{i}.png")
+        plt.savefig(f"{save_path}/LINtoCONV_MEMORIZE_sample_{i}.png")
         plt.close()
 
 
-def custom_loss(predicted, target, alpha=0):
+def regular_loss(predicted, target):
+    loss = nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
+    return loss
+
+def integral_loss(predicted, target, alpha=0):
 
     predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2]) # Sum over the grid for Nickel layer
     target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2]) # Sum over the grid for Nickel layer
@@ -68,7 +73,7 @@ def evaluate(model, data_loader):
             output = output.to(device)  # Move output to device
             outputs = model(input_tensor)  # Get model predictions
 
-            loss = custom_loss(outputs, output)  # Calculate loss
+            loss = regular_loss(outputs, output)  # Calculate loss
             total_loss += loss.item()  # Accumulate loss
 
             predicted_output.append(outputs)  # Store predictions
@@ -82,7 +87,7 @@ def evaluate(model, data_loader):
 
 def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)  # AdamW optimizer
-    criterion = custom_loss  # Custom loss function
+    criterion = regular_loss  # Custom loss function
     losses = []  # List to store training losses
     test_losses = []  # List to store test losses
 
@@ -93,7 +98,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001)
         for input_tensor_train, output_tensor_train in train_loader:
             optimizer.zero_grad()  # Zero gradients
             outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-
+            # pdb.set_trace()
             loss = criterion(outputs, output_tensor_train.to(device))  # Calculate loss
             loss.backward()  # Backpropagate loss
 

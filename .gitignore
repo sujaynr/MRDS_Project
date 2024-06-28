@@ -3,3 +3,5 @@ wandb/
 tilingVIS/slice*
 *.h5
 .DS_Store
+preTrainingVis/
+predictionVis/

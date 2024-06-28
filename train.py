@@ -9,10 +9,11 @@ from torchmetrics.functional import structural_similarity_index_measure as ssim
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 import os
+import pdb
 import wandb
 
 from models import LinToConv, SimplifiedMLP, LinToTransformer, MineralDataset
-from utils import plot_predictions, custom_loss, evaluate, train
+from utils import plot_predictions, integral_loss, evaluate, train
 
 grid_size = 50  # Adjusted to 50x50 grid
 hidden_dim = 512  # Adjust as necessary
@@ -43,9 +44,9 @@ non_empty_indices = np.sort(non_empty_indices)  # Sort indices
 
 # Split into training and testing sets (20% for testing)
 num_samples = len(non_empty_indices)
-num_test_samples = int(num_samples * 0.2)
+num_test_samples = int(num_samples * 0.1)
 test_indices = non_empty_indices[:num_test_samples]
-train_indices = non_empty_indices[num_test_samples:]  # Use the rest for training
+train_indices = non_empty_indices[:]  # Use the rest for training, OR ALL LIKE RN
 
 print(f"Shape of dataset after removing empty squares: {counts[non_empty_indices].shape}")
 
@@ -58,6 +59,7 @@ print("Layer mapping to elements:")
 for i, element in enumerate(elements):
     print(f"Layer {i}: {element}")
 
+
 # Create Dataset and DataLoader
 train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True)
 test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False)
@@ -67,9 +69,11 @@ test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
 
 # Initialize model and train
 input_dim = num_minerals * grid_size * grid_size
+# model = SimplifiedMLP(input_dim, hidden_dim)
 model = LinToConv(input_dim, hidden_dim, intermediate_dim)
 # model = LinToTransformer(input_dim, hidden_dim, intermediate_dim, d_model, nhead, num_layers, dropout_rate)
 model = model.to(device)
+pdb.set_trace()
 predicted_output_test, output_tensor_test = train(model, train_loader, test_loader, num_epochs=30, learning_rate=0.00001)
 
 # After the training process, reshape tensors back to the original shape for visualization and metric computation

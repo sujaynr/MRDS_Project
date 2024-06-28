@@ -8,7 +8,7 @@ from utils import gaussian_filter
 
 
 class MineralDataset(Dataset):
-    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1):
+    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=3):
         self.counts = counts[indices]
         self.input_minerals = input_minerals
         self.output_mineral = output_mineral
@@ -25,17 +25,17 @@ class MineralDataset(Dataset):
         input_data = gaussian_filter(input_data, sigma=self.sigma, mode='constant', truncate=3.0)
         output_data = gaussian_filter(output_data, sigma=self.sigma, mode='constant', truncate=3.0)
         
-        epsilon = 1e-8
-        input_sum = input_data.sum(axis=(1, 2), keepdims=True)
-        output_sum = output_data.sum(axis=(1, 2), keepdims=True)
+        # epsilon = 1e-8
+        # input_sum = input_data.sum(axis=(1, 2), keepdims=True)
+        # output_sum = output_data.sum(axis=(1, 2), keepdims=True)
         
-        if input_sum.sum() > 0:
-            input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
-        if output_sum.sum() > 0:
-            output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
+        # if input_sum.sum() > 0:
+        #     input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
+        # if output_sum.sum() > 0:
+        #     output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
 
         # Mask the output mineral (Nickel) during both training and testing
-        input_data[self.output_mineral, :, :] = 0
+        # input_data[self.output_mineral, :, :] = 0
 
         return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32)
 
