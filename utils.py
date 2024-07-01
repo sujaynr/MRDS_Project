@@ -3,6 +3,7 @@ import os
 import pdb
 import numpy as np
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import random
 import torch.nn as nn
@@ -13,68 +14,99 @@ from scipy.ndimage import gaussian_filter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def plot_predictions(predicted, ground_truth, num_samples=20, save_path="predictionVis"):
+def dice_coefficient(preds, target, threshold=0.5, smooth=1e-6):
+    # Binarize at first
+    preds = (preds > threshold).float()
+    target = (target > threshold).float()
+
+    preds_flat = preds.view(-1)
+    target_flat = target.view(-1)
+
+    intersection = (preds_flat * target_flat).sum()
+    union = preds_flat.sum() + target_flat.sum()
+
+    dice = (2. * intersection + smooth) / (union + smooth)
+    return dice
+
+def plot_predictions(predicted, ground_truth, input_data, input_minerals, output_mineral_name, num_samples=20, save_path="SweepVis", specs="NONE"):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+
+    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
     
-    # Find indices where the Nickel layer is non-empty
-    non_empty_nickel_indices = np.where(np.sum(ground_truth[:, 0, :, :], axis=(1, 2)) > 0)[0]
-    indices = random.sample(list(non_empty_nickel_indices), min(num_samples, len(non_empty_nickel_indices)))
+    # Find indices where the output mineral layer is non-empty
+    non_empty_output_indices = np.where(np.sum(ground_truth[:, 0, :, :], axis=(1, 2)) > 0)[0]
+    indices = random.sample(list(non_empty_output_indices), min(num_samples, len(non_empty_output_indices)))
     
     for i, idx in enumerate(indices):
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+        fig, axes = plt.subplots(2, 6, figsize=(30, 10))
         
         predicted_image = predicted[idx, 0, :, :]
         ground_truth_image = ground_truth[idx, 0, :, :]
         
-        im1 = axes[0].imshow(predicted_image, cmap='viridis')
+        # Plot predicted output mineral
+        im1 = axes[0, 0].imshow(predicted_image, cmap='viridis')
         pred_sum = predicted_image.sum()
-        axes[0].set_title(f'Predicted Nickel\nTotal: {pred_sum:.2f}')
+        axes[0, 0].set_title(f'Predicted {output_mineral_name}\nTotal: {pred_sum:.2f}')
         
-        im2 = axes[1].imshow(ground_truth_image, cmap='viridis')
+        # Plot ground truth output mineral
+        im2 = axes[0, 1].imshow(ground_truth_image, cmap='viridis')
         gt_sum = ground_truth_image.sum()
-        axes[1].set_title(f'Ground Truth Nickel\nTotal: {gt_sum:.2f}')
+        axes[0, 1].set_title(f'Ground Truth {output_mineral_name}\nTotal: {gt_sum:.2f}')
         
-        # Add batch dimension
-        ssim_value = ssim(preds=torch.tensor(predicted_image).unsqueeze(0).unsqueeze(0), 
-                          target=torch.tensor(ground_truth_image).unsqueeze(0).unsqueeze(0)).item()
-        fig.suptitle(f'Sample {i} - SSIM: {ssim_value:.4f}', fontsize=16)
+        # Plot ground truth for other 9 layers
+        for j, mineral_index in enumerate(input_minerals):
+            layer_image = input_data[idx, mineral_index, :, :]
+            im = axes[(j + 2) // 6, (j + 2) % 6].imshow(layer_image, cmap='viridis')
+            layer_sum = layer_image.sum()
+            axes[(j + 2) // 6, (j + 2) % 6].set_title(f'{elements[mineral_index]}\nTotal: {layer_sum:.2f}')
+            fig.colorbar(im, ax=axes[(j + 2) // 6, (j + 2) % 6])
+
+
+        dice_value = dice_coefficient(torch.tensor(predicted_image).unsqueeze(0).unsqueeze(0), 
+                                      torch.tensor(ground_truth_image).unsqueeze(0).unsqueeze(0)).item()
+        fig.suptitle(f'Sample {i} - Dice Coefficient: {dice_value:.4f}', fontsize=16)
         
-        fig.colorbar(im1, ax=axes[0])
-        fig.colorbar(im2, ax=axes[1])
+        fig.colorbar(im1, ax=axes[0, 0])
+        fig.colorbar(im2, ax=axes[0, 1])
         
-        plt.savefig(f"{save_path}/LINtoCONV_MEMORIZE_sample_{i}.png")
+
+        plt.savefig(f"{save_path}/{output_mineral_name}_{specs}_sample_{i}.png")
         plt.close()
 
+def custom_loss(predicted, target, alpha=1.0, beta=0.01):
+    mse_loss = F.mse_loss(predicted, target)
+    # Zero Variance Penalty: penalize low variance in predictions
+    variance_penalty = torch.var(predicted, dim=[1, 2, 3]).mean()
+    loss = alpha * mse_loss + beta / variance_penalty
+    return loss
 
-def regular_loss(predicted, target):
+def regular_loss(predicted, target): # MSE PER PIXEL
     loss = nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
     return loss
 
-def integral_loss(predicted, target, alpha=0):
-
-    predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2]) # Sum over the grid for Nickel layer
-    target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2]) # Sum over the grid for Nickel layer
-    sum_loss = nn.MSELoss()(predicted_sum, target_sum) # MSELoss on the sums
+def integral_loss(predicted, target): # MSE ON SUMS
+    predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2])
+    target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
+    sum_loss = nn.MSELoss()(predicted_sum, target_sum)
     
-    loss = (1 - alpha) * sum_loss
-    return loss
+    return sum_loss
 
-# Function to evaluate the model on a given dataset
-def evaluate(model, data_loader):
-    model.eval()  # Set model to evaluation mode
-    total_loss = 0  # Initialize total loss
-    predicted_output = []  # List to store predicted outputs
-    output_tensor = []  # List to store ground truth outputs
 
-    with torch.no_grad():  # No gradient computation
+def evaluate(model, data_loader, criterion):
+    model.eval()
+    total_loss = 0 
+    predicted_output = []
+    output_tensor = []
+
+    with torch.no_grad():
         for input_tensor, output in data_loader:
-            input_tensor = input_tensor.to(device)  # Move input to device
-            output = output.to(device)  # Move output to device
-            outputs = model(input_tensor)  # Get model predictions
+            input_tensor = input_tensor.to(device)
+            output = output.to(device)
+            outputs = model(input_tensor)
 
-            loss = regular_loss(outputs, output)  # Calculate loss
-            total_loss += loss.item()  # Accumulate loss
+            loss = criterion(outputs, output)
+            total_loss += loss.item()
 
             predicted_output.append(outputs)  # Store predictions
             output_tensor.append(output)  # Store ground truth
@@ -85,12 +117,23 @@ def evaluate(model, data_loader):
 
     return avg_loss, predicted_output, output_tensor
 
-def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001):
+def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, two_step=False, first_loss='integral', second_loss='pixel'):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)  # AdamW optimizer
-    criterion = regular_loss  # Custom loss function
+    
+    if first_loss == 'integral':
+        criterion1 = integral_loss
+    else:
+        criterion1 = regular_loss
+    
+    if second_loss == 'integral':
+        criterion2 = integral_loss
+    else:
+        criterion2 = regular_loss
+
     losses = []  # List to store training losses
     test_losses = []  # List to store test losses
 
+    # First step of training
     for epoch in range(num_epochs):
         model.train()  # Set model to training mode
         total_loss = 0  # Initialize total loss
@@ -98,8 +141,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001)
         for input_tensor_train, output_tensor_train in train_loader:
             optimizer.zero_grad()  # Zero gradients
             outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-            # pdb.set_trace()
-            loss = criterion(outputs, output_tensor_train.to(device))  # Calculate loss
+            loss = criterion1(outputs, output_tensor_train.to(device))  # Calculate loss
             loss.backward()  # Backpropagate loss
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
@@ -110,15 +152,43 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001)
         avg_loss = total_loss / len(train_loader)  # Average loss
         losses.append(avg_loss)  # Store average loss
 
-        test_loss, _, _ = evaluate(model, test_loader)  # Evaluate model on test set
+        test_loss, _, _ = evaluate(model, test_loader, criterion1)  # Evaluate model on test set
         test_losses.append(test_loss)  # Store test loss
 
-        wandb.log({"Train Loss": avg_loss, "Test Loss": test_loss})  # Log losses to wandb
+        wandb.log({"Train Loss (Step 1)": avg_loss, "Test Loss (Step 1)": test_loss})  # Log losses to wandb
 
-        print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
+        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
+
+    # Second step of training (if two-step training is enabled)
+    if two_step:
+        for epoch in range(num_epochs):
+            model.train()  # Set model to training mode
+            total_loss = 0  # Initialize total loss
+            
+            for input_tensor_train, output_tensor_train in train_loader:
+                optimizer.zero_grad()  # Zero gradients
+                outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
+                loss = criterion2(outputs, output_tensor_train.to(device))  # Calculate loss
+                loss.backward()  # Backpropagate loss
+
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
+                optimizer.step()  # Update weights
+
+                total_loss += loss.item()  # Accumulate loss
+
+            avg_loss = total_loss / len(train_loader)  # Average loss
+            losses.append(avg_loss)  # Store average loss
+
+            test_loss, _, _ = evaluate(model, test_loader, criterion2)  # Evaluate model on test set
+            test_losses.append(test_loss)  # Store test loss
+
+            wandb.log({"Train Loss (Step 2)": avg_loss, "Test Loss (Step 2)": test_loss})  # Log losses to wandb
+
+            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
 
     # Evaluate final model on test set
-    test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader)
+    final_criterion = criterion2 if two_step else criterion1
+    test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader, final_criterion)
 
     print(f'Final Test Loss: {test_loss}')  # Print final test loss
 
@@ -134,8 +204,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001)
     
     wandb.save('trainingVis/loss_curve.png')  # Save loss curve plot to wandb
 
-    return predicted_output_test, output_tensor_test  # Return final predictions and ground truth
-
+    return predicted_output_test, output_tensor_test
 
 
 def weighted_mse_loss(pred, target, weight):

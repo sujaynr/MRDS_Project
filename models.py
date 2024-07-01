@@ -1,14 +1,16 @@
 import torch
+import torch.nn.functional as F
 import pdb
 import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+import segmentation_models_pytorch as smp
 
 from utils import gaussian_filter
 
 
 class MineralDataset(Dataset):
-    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=3):
+    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1):
         self.counts = counts[indices]
         self.input_minerals = input_minerals
         self.output_mineral = output_mineral
@@ -19,23 +21,30 @@ class MineralDataset(Dataset):
         return len(self.counts)
 
     def __getitem__(self, idx):
+        unet = False
         input_data = self.counts[idx].copy()
         output_data = input_data[self.output_mineral:self.output_mineral+1, :, :]
 
         input_data = gaussian_filter(input_data, sigma=self.sigma, mode='constant', truncate=3.0)
         output_data = gaussian_filter(output_data, sigma=self.sigma, mode='constant', truncate=3.0)
         
-        # epsilon = 1e-8
-        # input_sum = input_data.sum(axis=(1, 2), keepdims=True)
-        # output_sum = output_data.sum(axis=(1, 2), keepdims=True)
+        epsilon = 1e-8
+        input_sum = input_data.sum(axis=(1, 2), keepdims=True)
+        output_sum = output_data.sum(axis=(1, 2), keepdims=True)
         
-        # if input_sum.sum() > 0:
-        #     input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
-        # if output_sum.sum() > 0:
-        #     output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
+        if input_sum.sum() > 0:
+            input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
+        if output_sum.sum() > 0:
+            output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
 
         # Mask the output mineral (Nickel) during both training and testing
-        # input_data[self.output_mineral, :, :] = 0
+        input_data[self.output_mineral, :, :] = 0
+
+        if unet:
+            pad = (0, 14, 0, 14)  # Padding (left, right, top, bottom)
+            input_data = np.pad(input_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
+            output_data = np.pad(output_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
+
 
         return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32)
 
@@ -44,7 +53,151 @@ class MineralDataset(Dataset):
 grid_size = 50  # Adjusted to 50x50 grid
 
 
-class MineralTransformer(nn.Module):
+class TransformerToConv(nn.Module): ############################### ARCH 2
+    def __init__(self, input_dim, hidden_dim, intermediate_dim, d_model, nhead, num_layers, dropout_rate):
+        super(TransformerToConv, self).__init__()
+        self.fc1 = nn.Linear(input_dim, intermediate_dim)
+        self.fc2 = nn.Linear(intermediate_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, d_model)
+        self.d_model = d_model  # Save d_model as a class attribute
+        self.hidden_dim = hidden_dim  # Save hidden_dim as a class attribute
+
+        self.transformer_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dropout=dropout_rate, batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(self.transformer_layer, num_layers=num_layers)
+
+        self.fc4 = nn.Linear(d_model, hidden_dim * grid_size * grid_size)  # Fully connected layer to map back to the spatial dimensions
+        self.conv1 = nn.Conv2d(in_channels=hidden_dim, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=1, kernel_size=3, padding=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, src):
+        batch_size = src.size(0)
+        src_flat = src.view(batch_size, -1)
+        # print(f"Input src shape: {src.shape}")
+        x = self.relu(self.fc1(src_flat))
+        # print(f"After fc1: {x.shape}")
+        x = self.relu(self.fc2(x))
+        # print(f"After fc2: {x.shape}")
+        x = self.relu(self.fc3(x))
+        # print(f"After fc3: {x.shape}")
+
+        x = x.view(batch_size, -1, self.d_model)  # Change shape to (batch_size, seq_len, d_model)
+        # print(f"After reshaping: {x.shape}")
+        x = self.transformer_encoder(x)
+        # print(f"After transformer encoder: {x.shape}")
+
+        x = self.relu(self.fc4(x))
+        # print(f"After fc4: {x.shape}")
+        x = x.view(batch_size, self.hidden_dim, grid_size, grid_size)  # Reshape to (batch_size, hidden_dim, grid_size, grid_size)
+        # print(f"After reshaping to spatial dimensions: {x.shape}")
+
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+
+        return x
+
+
+
+class LinToConv(nn.Module): ############################### ARCH 1
+    def __init__(self, input_dim, hidden_dim, intermediate_dim):
+        super(LinToConv, self).__init__()
+        self.fc1 = nn.Linear(input_dim, intermediate_dim)
+        self.fc2 = nn.Linear(intermediate_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, grid_size * grid_size)
+        
+        self.conv1 = nn.Conv2d(in_channels=10, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=1, kernel_size=3, padding=1)
+        
+        self.relu = nn.ReLU()
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+
+    def forward(self, src):
+        batch_size = src.size(0)
+        src_flat = src.view(batch_size, -1)
+
+        x = self.relu(self.fc1(src_flat))
+        x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
+
+        x = x.view(batch_size, 1, grid_size, grid_size)
+
+        x = self.relu(self.conv1(src))
+        x = self.maxpool(x)
+        x = self.upsample(x)
+        x = self.relu(self.conv2(x))
+        return x
+
+class UNet(nn.Module): ############################### ARCH 3
+    def __init__(self, in_channels, out_channels):
+        super(UNet, self).__init__()
+        self.unet = smp.Unet(
+            encoder_name='resnet34', 
+            encoder_weights=None,
+            in_channels=in_channels,
+            classes=out_channels
+        )
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.unet(x)
+        x = self.relu(x)
+        return x
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class MineralTransformer(nn.Module): 
     def __init__(self, d_model=512, nhead=4, num_encoder_layers=2, num_decoder_layers=2, dim_feedforward=1024, dropout=0.5):
         super(MineralTransformer, self).__init__()
 
@@ -129,8 +282,6 @@ class MineralTransformer(nn.Module):
 
         return output
 
-
-
 grid_size = 50  # Adjusted to 50x50 grid
 
 class SimplifiedMLP(nn.Module):
@@ -153,37 +304,6 @@ class SimplifiedMLP(nn.Module):
 
         return output
 
-
-
-class LinToConv(nn.Module):
-    def __init__(self, input_dim, hidden_dim, intermediate_dim):
-        super(LinToConv, self).__init__()
-        self.fc1 = nn.Linear(input_dim, intermediate_dim)
-        self.fc2 = nn.Linear(intermediate_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, grid_size * grid_size)
-        
-        self.conv1 = nn.Conv2d(in_channels=10, out_channels=hidden_dim, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=1, kernel_size=3, padding=1)
-        
-        self.relu = nn.ReLU()
-        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-
-    def forward(self, src):
-        batch_size = src.size(0)
-        src_flat = src.view(batch_size, -1)
-
-        x = self.relu(self.fc1(src_flat))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
-
-        x = x.view(batch_size, 1, grid_size, grid_size)
-
-        x = self.relu(self.conv1(src))
-        x = self.maxpool(x)
-        x = self.upsample(x)
-        x = self.relu(self.conv2(x))  # Add relu here
-        return x
 
 class LinToTransformer(nn.Module):
     def __init__(self, input_dim, hidden_dim, intermediate_dim, d_model, nhead, num_layers, dropout_rate):
@@ -219,74 +339,6 @@ class LinToTransformer(nn.Module):
         x = x.view(batch_size, 1, grid_size, grid_size)  # Reshape back to (batch_size, 1, grid_size, grid_size)
 
         return x
-
-class Unet(nn.Module):
-    def __init__(self, n_class):
-        super().__init__()
-
-        # Encoder
-        self.enc_conv1 = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-        self.enc_conv2 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-
-        # Decoder
-        self.dec_conv1 = nn.Sequential(
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-        self.dec_conv2 = nn.Sequential(
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True)
-        )
-        self.final_conv = nn.ConvTranspose2d(64, 1, kernel_size=2, stride=2)
-
-    def forward(self, x):
-        # Encoder
-        x1 = self.enc_conv1(x)
-        x2 = self.enc_conv2(x1)
-
-        # Decoder
-        x = self.dec_conv1(torch.cat([x2, x1], dim=1))
-        x = self.dec_conv2(x)
-        x = self.final_conv(x)
-
-        return x
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 grid_sizeS = 60
 class SimpleMineralTransformer(nn.Module):
