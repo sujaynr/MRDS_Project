@@ -10,18 +10,18 @@ from utils import gaussian_filter
 
 
 class MineralDataset(Dataset):
-    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1):
+    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1, unet=False):
         self.counts = counts[indices]
         self.input_minerals = input_minerals
         self.output_mineral = output_mineral
         self.train = train
         self.sigma = sigma
+        self.unet = unet
 
     def __len__(self):
         return len(self.counts)
 
     def __getitem__(self, idx):
-        unet = False
         input_data = self.counts[idx].copy()
         output_data = input_data[self.output_mineral:self.output_mineral+1, :, :]
 
@@ -40,7 +40,7 @@ class MineralDataset(Dataset):
         # Mask the output mineral (Nickel) during both training and testing
         input_data[self.output_mineral, :, :] = 0
 
-        if unet:
+        if self.unet:
             pad = (0, 14, 0, 14)  # Padding (left, right, top, bottom)
             input_data = np.pad(input_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
             output_data = np.pad(output_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)

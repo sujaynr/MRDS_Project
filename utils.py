@@ -28,7 +28,7 @@ def dice_coefficient(preds, target, threshold=0.5, smooth=1e-6):
     dice = (2. * intersection + smooth) / (union + smooth)
     return dice
 
-def plot_predictions(predicted, ground_truth, input_data, input_minerals, output_mineral_name, num_samples=20, save_path="SweepVis", specs="NONE"):
+def plot_predictions(predicted, ground_truth, input_data, input_minerals, output_mineral_name, num_samples=20, save_path="SweepVISB1", specs="NONE"):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
@@ -81,21 +81,37 @@ def custom_loss(predicted, target, alpha=1.0, beta=0.01):
     loss = alpha * mse_loss + beta / variance_penalty
     return loss
 
-def regular_loss(predicted, target): # MSE PER PIXEL
-    loss = nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
-    return loss
+def regular_loss(predicted, target):  # MSE PER PIXEL
+    return nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
 
-def integral_loss(predicted, target): # MSE ON SUMS
+def integral_loss(predicted, target):  # MSE ON SUMS
     predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2])
     target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
-    sum_loss = nn.MSELoss()(predicted_sum, target_sum)
-    
-    return sum_loss
+    return nn.MSELoss()(predicted_sum, target_sum)
+
+def combined_loss(predicted, target, first_loss_type, lagrange_multiplier_pixel=1e7, lagrange_multiplier_integral=1e-5):
+    """
+    Combined loss function.
+    If the first loss type is pixel, then the combined loss is:
+        integral_loss(predicted, target) + lagrange_multiplier_pixel * pixel_loss(predicted, target)
+    If the first loss type is integral, then the combined loss is:
+        pixel_loss(predicted, target) + lagrange_multiplier_integral * integral_loss(predicted, target)
+    """
+    if first_loss_type == 'pixel':
+        primary_loss_value = regular_loss(predicted, target)
+        secondary_loss_value = integral_loss(predicted, target)
+        return secondary_loss_value + lagrange_multiplier_pixel * primary_loss_value
+    elif first_loss_type == 'integral':
+        primary_loss_value = integral_loss(predicted, target)
+        secondary_loss_value = regular_loss(predicted, target)
+        return secondary_loss_value + lagrange_multiplier_integral * primary_loss_value
+    else:
+        raise ValueError(f"Unknown first_loss_type: {first_loss_type}")
 
 
 def evaluate(model, data_loader, criterion):
     model.eval()
-    total_loss = 0 
+    total_loss = 0
     predicted_output = []
     output_tensor = []
 
@@ -106,29 +122,25 @@ def evaluate(model, data_loader, criterion):
             outputs = model(input_tensor)
 
             loss = criterion(outputs, output)
+            # pdb.set_trace()
             total_loss += loss.item()
 
-            predicted_output.append(outputs)  # Store predictions
-            output_tensor.append(output)  # Store ground truth
+            predicted_output.append(outputs)
+            output_tensor.append(output)
 
-    avg_loss = total_loss / len(data_loader)  # Average loss
-    predicted_output = torch.cat(predicted_output, dim=0)  # Concatenate predictions
-    output_tensor = torch.cat(output_tensor, dim=0)  # Concatenate ground truth
+    avg_loss = total_loss / len(data_loader)
+    predicted_output = torch.cat(predicted_output, dim=0)
+    output_tensor = torch.cat(output_tensor, dim=0)
 
     return avg_loss, predicted_output, output_tensor
 
-def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, two_step=False, first_loss='integral', second_loss='pixel'):
+def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, two_step=False, first_loss='integral'):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)  # AdamW optimizer
     
     if first_loss == 'integral':
-        criterion1 = integral_loss
+        primary_loss = integral_loss
     else:
-        criterion1 = regular_loss
-    
-    if second_loss == 'integral':
-        criterion2 = integral_loss
-    else:
-        criterion2 = regular_loss
+        primary_loss = regular_loss
 
     losses = []  # List to store training losses
     test_losses = []  # List to store test losses
@@ -141,7 +153,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
         for input_tensor_train, output_tensor_train in train_loader:
             optimizer.zero_grad()  # Zero gradients
             outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-            loss = criterion1(outputs, output_tensor_train.to(device))  # Calculate loss
+            loss = primary_loss(outputs, output_tensor_train.to(device))  # Calculate loss
             loss.backward()  # Backpropagate loss
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
@@ -152,7 +164,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
         avg_loss = total_loss / len(train_loader)  # Average loss
         losses.append(avg_loss)  # Store average loss
 
-        test_loss, _, _ = evaluate(model, test_loader, criterion1)  # Evaluate model on test set
+        test_loss, _, _ = evaluate(model, test_loader, primary_loss)  # Evaluate model on test set
         test_losses.append(test_loss)  # Store test loss
 
         wandb.log({"Train Loss (Step 1)": avg_loss, "Test Loss (Step 1)": test_loss})  # Log losses to wandb
@@ -168,7 +180,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
             for input_tensor_train, output_tensor_train in train_loader:
                 optimizer.zero_grad()  # Zero gradients
                 outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-                loss = criterion2(outputs, output_tensor_train.to(device))  # Calculate loss
+                loss = combined_loss(outputs, output_tensor_train.to(device), first_loss)  # Calculate combined loss
                 loss.backward()  # Backpropagate loss
 
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
@@ -179,7 +191,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
             avg_loss = total_loss / len(train_loader)  # Average loss
             losses.append(avg_loss)  # Store average loss
 
-            test_loss, _, _ = evaluate(model, test_loader, criterion2)  # Evaluate model on test set
+            test_loss, _, _ = evaluate(model, test_loader, lambda p, t: combined_loss(p, t, first_loss))  # Evaluate model on test set
             test_losses.append(test_loss)  # Store test loss
 
             wandb.log({"Train Loss (Step 2)": avg_loss, "Test Loss (Step 2)": test_loss})  # Log losses to wandb
@@ -187,10 +199,10 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
             print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
 
     # Evaluate final model on test set
-    final_criterion = criterion2 if two_step else criterion1
+    final_criterion = lambda p, t: combined_loss(p, t, first_loss) if two_step else primary_loss(p, t)
     test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader, final_criterion)
 
-    print(f'Final Test Loss: {test_loss}')  # Print final test loss
+    print(f'Final Test Loss: {test_loss}')
 
     # Plot training and test loss curves
     plt.plot(losses, label='Train Loss')
@@ -204,8 +216,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
     
     wandb.save('trainingVis/loss_curve.png')  # Save loss curve plot to wandb
 
-    return predicted_output_test, output_tensor_test
-
+    return predicted_output_test, output_tensor_test 
 
 def weighted_mse_loss(pred, target, weight):
     return torch.mean(weight * (pred - target) ** 2)
