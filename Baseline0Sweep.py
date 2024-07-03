@@ -1,3 +1,5 @@
+#### B1
+
 import subprocess
 
 model_types = ['tc', 'u', 'lc', 'lt']  # tc: TransformerToConv, u: UNet, lc: LinToConv, lt: LinToTransformer
