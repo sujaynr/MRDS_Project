@@ -5,6 +5,8 @@ import torch.optim as optim
 import h5py
 import numpy as np
 import random
+import geopandas as gpd
+
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.functional import structural_similarity_index_measure as ssim
 import matplotlib.pyplot as plt
@@ -94,26 +96,65 @@ wandb.init(project="mineral_transformer_project", name=model_type_and_losses, co
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load data from HDF5 file
-h5_file_path = 'prepared_data_TILES/NEmineral_data.h5'
+h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
 
 # Load counts data to find non-empty squares
 with h5py.File(h5_file_path, 'r') as f:
+    coords = f['coordinates'][:]
     counts = f['counts'][:]
+    qualities = f['qualities'][:]
 
 print(f"Original shape of dataset: {counts.shape}")
 
-# Ensure the square is non-empty overall
-non_empty_indices = np.where(np.sum(counts, axis=(1, 2, 3)) > 0)[0]
-np.random.shuffle(non_empty_indices)
-non_empty_indices = np.sort(non_empty_indices)
-
-
-num_samples = len(non_empty_indices)
+num_samples = len(counts)
 num_test_samples = int(num_samples * 0.1)
-test_indices = non_empty_indices[:num_test_samples]
-train_indices = non_empty_indices[num_test_samples:]  # Use the rest for training
+test_indices = np.arange(num_test_samples)
+train_indices = np.arange(num_test_samples, num_samples)
 
-print(f"Shape of dataset after removing empty squares: {counts[non_empty_indices].shape}")
+
+shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
+output_path = '/home/sujaynair/MRDS_Project/tilingVIS/trainValVIS.png'
+us_shapefile = gpd.read_file(shapefile_path)
+us_shape = us_shapefile[us_shapefile['ADMIN'] == 'United States of America']
+def miles_to_degrees_lat(miles):
+    return miles / 69.0
+
+def miles_to_degrees_lon(miles, latitude):
+    return miles / (69.0 * np.cos(np.radians(latitude)))
+
+# Visualize the squares
+def visualize_squares_with_coords(coords, train_indices, test_indices, us_shape, output_path):
+    fig, ax = plt.subplots(figsize=(15, 10))
+    us_shape.boundary.plot(ax=ax, color='black')
+    
+    # Plot train squares
+    for idx in train_indices:
+        lat_start, lon_start = coords[idx]
+        circle = plt.Circle((lon_start, lat_start), miles_to_degrees_lon(5, lat_start), color='blue', alpha=0.3, edgecolor='none')
+        ax.add_patch(circle)
+    
+    # Plot test squares
+    for idx in test_indices:
+        lat_start, lon_start = coords[idx]
+        circle = plt.Circle((lon_start, lat_start), miles_to_degrees_lon(5, lat_start), color='red', alpha=0.3, edgecolor='none')
+        ax.add_patch(circle)
+    
+    # Add legend
+    train_patch = plt.Circle((0, 0), 1, color='blue', alpha=0.3, edgecolor='none')
+    test_patch = plt.Circle((0, 0), 1, color='red', alpha=0.3, edgecolor='none')
+    ax.legend([train_patch, test_patch], ['Train Squares', 'Test Squares'], loc='upper right')
+    
+    plt.title("Train and Test Squares Mapped on US")
+    plt.savefig(output_path)
+    plt.close(fig)
+visualize_squares_with_coords(coords, train_indices, test_indices, us_shape, output_path)
+assert(False)
+
+
+
+
+
+
 
 elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
 output_mineral = elements.index(output_mineral_name)

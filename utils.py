@@ -82,9 +82,15 @@ def custom_loss(predicted, target, alpha=1.0, beta=0.01):
     return loss
 
 def regular_loss(predicted, target):  # MSE PER PIXEL
+    mask = True
+    if mask:
+        mask = target[:, 0, :, :] > 0 # Only consider pixels where the target is non-zero
+        pdb.set_trace()
+        return nn.MSELoss()(predicted[:, 0, :, :][mask], target[:, 0, :, :][mask])
     return nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
 
 def integral_loss(predicted, target):  # MSE ON SUMS
+    pdb.set_trace()
     predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2])
     target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
     return nn.MSELoss()(predicted_sum, target_sum)

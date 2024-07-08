@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 file_path = '/home/sujaynair/mrds.csv'
 shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
 data_dir = 'prepared_data_TILES'
-h5_file_path = os.path.join(data_dir, 'NEmineral_data.h5')
+h5_file_path = os.path.join(data_dir, 'mineralDataWithCoords.h5')
 
 # Ensure data directory exists
 os.makedirs(data_dir, exist_ok=True)
@@ -123,14 +123,17 @@ def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
     with h5py.File(h5_file_path, 'w') as f:
         count_ds = f.create_dataset('counts', (num_squares, num_minerals, grid_size, grid_size), dtype='f')
         quality_ds = f.create_dataset('qualities', (num_squares, num_minerals, grid_size, grid_size), dtype='f')
+        coord_ds = f.create_dataset('coordinates', (num_squares, 2), dtype='f')
         print(f"Shape of 'counts' dataset: {count_ds.shape}")
         print(f"Shape of 'qualities' dataset: {quality_ds.shape}")
+        print(f"Shape of 'coordinates' dataset: {coord_ds.shape}")
 
         for idx, square in enumerate(squares):
             print(f"Processing square {idx + 1}/{num_squares}...")
             counts, qualities = fill_cells(df, square, grid_size, cell_size)
             count_ds[idx] = counts
             quality_ds[idx] = qualities
+            coord_ds[idx] = square
     
     return squares
 
@@ -139,7 +142,7 @@ squares = create_hdf5_file(h5_file_path, df, num_squares=10000)
 
 print("Data preparation completed.")
 # Visualization
-def visualize_squares(squares, us_shape, output_path='generated_squares.png'):
+def visualize_squares(squares, us_shape, output_path='generated_squares2.png'):
     fig, ax = plt.subplots(figsize=(15, 10))
     us_shape.boundary.plot(ax=ax, color='black')
     
@@ -153,4 +156,4 @@ def visualize_squares(squares, us_shape, output_path='generated_squares.png'):
     plt.close(fig)
 
 # Example usage
-visualize_squares(squares, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares.png')
+visualize_squares(squares, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares2.png')
