@@ -49,7 +49,6 @@ def load_h5_data(h5_file_path):
         coords = f['coordinates'][:]
         counts = f['counts'][:]
         qualities = f['qualities'][:]
-        pdb.set_trace()
     return coords, counts, qualities
 
 # Check if cell intersects with fault lines and get slip rates
@@ -128,4 +127,12 @@ if __name__ == "__main__":
     print("Visualizing squares and fault lines...")
     us_shapefile = gpd.read_file(shapefile_path)
     us_shape = us_shapefile[us_shapefile['ADMIN'] == 'United States of America']
-    visualize_squares_and_faults(coords, fault_lines, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares_with_faults.png')
+    # visualize_squares_and_faults(coords, fault_lines, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares_with_faults.png')
+    
+    shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
+    fault_file = '/home/sujaynair/MRDS_Project/prepared_data_TILES/faultData.h5'
+    mineral_file = 'prepared_data_TILES/mineralDataWithCoords.h5'
+    with h5py.File(fault_file, 'r') as f:
+        pdb.set_trace()
+
+

@@ -28,7 +28,7 @@ def dice_coefficient(preds, target, threshold=0.5, smooth=1e-6):
     dice = (2. * intersection + smooth) / (union + smooth)
     return dice
 
-def plot_predictions(predicted, ground_truth, input_data, input_minerals, output_mineral_name, num_samples=20, save_path="SweepVISB1", specs="NONE"):
+def plot_predictions(predicted, ground_truth, input_data, input_minerals, fault_data, output_mineral_name, num_samples=20, save_path="SweepVISB2", specs="NONE"):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
@@ -62,6 +62,12 @@ def plot_predictions(predicted, ground_truth, input_data, input_minerals, output
             axes[(j + 2) // 6, (j + 2) % 6].set_title(f'{elements[mineral_index]}\nTotal: {layer_sum:.2f}')
             fig.colorbar(im, ax=axes[(j + 2) // 6, (j + 2) % 6])
 
+        # Plot fault data
+        fault_image = fault_data[idx, 0, :, :]
+        im3 = axes[1, 5].imshow(fault_image, cmap='viridis')
+        fault_sum = fault_image.sum()
+        axes[1, 5].set_title(f'Fault Data\nTotal: {fault_sum:.2f}')
+        fig.colorbar(im3, ax=axes[1, 5])
 
         dice_value = dice_coefficient(torch.tensor(predicted_image).unsqueeze(0).unsqueeze(0), 
                                       torch.tensor(ground_truth_image).unsqueeze(0).unsqueeze(0)).item()
@@ -70,9 +76,11 @@ def plot_predictions(predicted, ground_truth, input_data, input_minerals, output
         fig.colorbar(im1, ax=axes[0, 0])
         fig.colorbar(im2, ax=axes[0, 1])
         
-
         plt.savefig(f"{save_path}/{output_mineral_name}_{specs}_sample_{i}.png")
         plt.close()
+
+def binary_cross_entropy_loss(predicted, target):
+    return nn.BCELoss()(predicted, target)
 
 def custom_loss(predicted, target, alpha=1.0, beta=0.01):
     mse_loss = F.mse_loss(predicted, target)
@@ -81,19 +89,19 @@ def custom_loss(predicted, target, alpha=1.0, beta=0.01):
     loss = alpha * mse_loss + beta / variance_penalty
     return loss
 
-def regular_loss(predicted, target):  # MSE PER PIXEL
-    mask = True
-    if mask:
-        mask = target[:, 0, :, :] > 0 # Only consider pixels where the target is non-zero
-        pdb.set_trace()
-        return nn.MSELoss()(predicted[:, 0, :, :][mask], target[:, 0, :, :][mask])
+def regular_loss(predicted, target):
     return nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
 
 def integral_loss(predicted, target):  # MSE ON SUMS
-    pdb.set_trace()
     predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2])
     target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
     return nn.MSELoss()(predicted_sum, target_sum)
+
+def nonempty_loss(predicted, target):  # MSE PER PIXEL FOR NON-EMPTY
+    mask = target[:, 0, :, :] > 0 
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device=predicted.device)
+    return nn.MSELoss()(predicted[:, 0, :, :][mask], target[:, 0, :, :][mask])
 
 def combined_loss(predicted, target, first_loss_type, lagrange_multiplier_pixel=1e7, lagrange_multiplier_integral=1e-5):
     """
@@ -113,11 +121,10 @@ def combined_loss(predicted, target, first_loss_type, lagrange_multiplier_pixel=
         return secondary_loss_value + lagrange_multiplier_integral * primary_loss_value
     else:
         raise ValueError(f"Unknown first_loss_type: {first_loss_type}")
-
-
-def evaluate(model, data_loader, criterion):
+def evaluate(model, data_loader, criterion, use_bce=False):
     model.eval()
     total_loss = 0
+    total_nonempty_loss = 0
     predicted_output = []
     output_tensor = []
 
@@ -127,102 +134,134 @@ def evaluate(model, data_loader, criterion):
             output = output.to(device)
             outputs = model(input_tensor)
 
-            loss = criterion(outputs, output)
-            # pdb.set_trace()
-            total_loss += loss.item()
+            if use_bce:
+                loss = criterion(outputs, output).item()
+                outputs = torch.sigmoid(outputs)  # Apply sigmoid after calculating loss
+            else:
+
+                loss = criterion(outputs, output).item()
+            
+            nonempty_loss_value = nonempty_loss(outputs, output).item()
+            total_loss += loss
+            total_nonempty_loss += nonempty_loss_value
 
             predicted_output.append(outputs)
             output_tensor.append(output)
 
     avg_loss = total_loss / len(data_loader)
+    avg_nonempty_loss = total_nonempty_loss / len(data_loader)
     predicted_output = torch.cat(predicted_output, dim=0)
     output_tensor = torch.cat(output_tensor, dim=0)
 
-    return avg_loss, predicted_output, output_tensor
+    return avg_loss, avg_nonempty_loss, predicted_output, output_tensor
 
-def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, two_step=False, first_loss='integral'):
+def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, criterion = integral_loss, two_step=False, first_loss='integral', use_bce=False):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)  # AdamW optimizer
-    
-    if first_loss == 'integral':
-        primary_loss = integral_loss
-    else:
-        primary_loss = regular_loss
+
+    # if use_bce:
+    #     criterion = nn.BCEWithLogitsLoss()  # BCE with logits
+    # else:
+    #     if first_loss == 'integral':
+    #         criterion = integral_loss
+    #     else:
+    #         criterion = regular_loss
 
     losses = []  # List to store training losses
     test_losses = []  # List to store test losses
+    nonempty_losses = []  # List to store non-empty losses
 
     # First step of training
     for epoch in range(num_epochs):
         model.train()  # Set model to training mode
         total_loss = 0  # Initialize total loss
-        
+        total_nonempty_loss = 0  # Initialize total non-empty loss
+
         for input_tensor_train, output_tensor_train in train_loader:
+            input_tensor_train.requires_grad = True  # Ensure gradients are tracked
+            output_tensor_train.requires_grad = True  # Ensure gradients are tracked
             optimizer.zero_grad()  # Zero gradients
             outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-            loss = primary_loss(outputs, output_tensor_train.to(device))  # Calculate loss
+            if use_bce:
+                loss = criterion(outputs, output_tensor_train.to(device))
+            else:
+                loss = criterion(outputs, output_tensor_train.to(device))
+            nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))  # Calculate non-empty loss
             loss.backward()  # Backpropagate loss
 
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
             optimizer.step()  # Update weights
 
             total_loss += loss.item()  # Accumulate loss
+            total_nonempty_loss += nonempty_loss_value.item()  # Accumulate non-empty loss
 
         avg_loss = total_loss / len(train_loader)  # Average loss
+        avg_nonempty_loss = total_nonempty_loss / len(train_loader)  # Average non-empty loss
         losses.append(avg_loss)  # Store average loss
-
-        test_loss, _, _ = evaluate(model, test_loader, primary_loss)  # Evaluate model on test set
+        test_loss, nonempty_test_loss, _, _ = evaluate(model, test_loader, criterion, use_bce=use_bce)  # Evaluate model on test set
         test_losses.append(test_loss)  # Store test loss
+        nonempty_losses.append(nonempty_test_loss)  # Store non-empty loss
 
-        wandb.log({"Train Loss (Step 1)": avg_loss, "Test Loss (Step 1)": test_loss})  # Log losses to wandb
+        wandb.log({"Train Loss (Step 1)": avg_loss, "Test Loss (Step 1)": test_loss, "Non-Empty Train Loss (Step 1)": avg_nonempty_loss, "Non-Empty Test Loss (Step 1)": nonempty_test_loss})  # Log losses to wandb
 
-        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
+        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}')  # Print losses
 
     # Second step of training (if two-step training is enabled)
     if two_step:
         for epoch in range(num_epochs):
             model.train()  # Set model to training mode
             total_loss = 0  # Initialize total loss
-            
+            total_nonempty_loss = 0  # Initialize total non-empty loss
+
             for input_tensor_train, output_tensor_train in train_loader:
+                input_tensor_train.requires_grad = True  # Ensure gradients are tracked
+                output_tensor_train.requires_grad = True  # Ensure gradients are tracked
                 optimizer.zero_grad()  # Zero gradients
                 outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-                loss = combined_loss(outputs, output_tensor_train.to(device), first_loss)  # Calculate combined loss
+                if use_bce:
+                    loss = criterion(outputs, output_tensor_train.to(device))
+                else:
+                    loss = combined_loss(outputs, output_tensor_train.to(device), first_loss)  # Calculate combined loss
+                nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))  # Calculate non-empty loss
                 loss.backward()  # Backpropagate loss
 
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
                 optimizer.step()  # Update weights
 
                 total_loss += loss.item()  # Accumulate loss
+                total_nonempty_loss += nonempty_loss_value.item()  # Accumulate non-empty loss
 
             avg_loss = total_loss / len(train_loader)  # Average loss
+            avg_nonempty_loss = total_nonempty_loss / len(train_loader)  # Average non-empty loss
             losses.append(avg_loss)  # Store average loss
 
-            test_loss, _, _ = evaluate(model, test_loader, lambda p, t: combined_loss(p, t, first_loss))  # Evaluate model on test set
+            test_loss, nonempty_test_loss, _, _ = evaluate(model, test_loader, lambda p, t: combined_loss(p, t, first_loss), use_bce=use_bce)  # Evaluate model on test set
             test_losses.append(test_loss)  # Store test loss
+            nonempty_losses.append(nonempty_test_loss)  # Store non-empty loss
 
-            wandb.log({"Train Loss (Step 2)": avg_loss, "Test Loss (Step 2)": test_loss})  # Log losses to wandb
+            wandb.log({"Train Loss (Step 2)": avg_loss, "Test Loss (Step 2)": test_loss, "Non-Empty Train Loss (Step 2)": avg_nonempty_loss, "Non-Empty Test Loss (Step 2)": nonempty_test_loss})  # Log losses to wandb
 
-            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}')  # Print losses
+            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}')  # Print losses
 
     # Evaluate final model on test set
-    final_criterion = lambda p, t: combined_loss(p, t, first_loss) if two_step else primary_loss(p, t)
-    test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader, final_criterion)
+    final_criterion = lambda p, t: combined_loss(p, t, first_loss) if two_step else criterion(p, t)
+    test_loss, nonempty_test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader, final_criterion, use_bce=use_bce)
 
-    print(f'Final Test Loss: {test_loss}')
+    print(f'Final Test Loss: {test_loss}, Non-Empty Test Loss: {nonempty_test_loss}')
 
     # Plot training and test loss curves
     plt.plot(losses, label='Train Loss')
     plt.plot(test_losses, label='Test Loss')
+    plt.plot(nonempty_losses, label='Non-Empty Test Loss')
     plt.title('Loss Curve')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
     plt.savefig('trainingVis/loss_curve.png')
     plt.close()
-    
+
     wandb.save('trainingVis/loss_curve.png')  # Save loss curve plot to wandb
 
-    return predicted_output_test, output_tensor_test 
+    return predicted_output_test, output_tensor_test
 
 def weighted_mse_loss(pred, target, weight):
     return torch.mean(weight * (pred - target) ** 2)
