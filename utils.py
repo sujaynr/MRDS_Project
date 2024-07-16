@@ -14,63 +14,137 @@ from scipy.ndimage import gaussian_filter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def dice_coefficient(preds, target, threshold=0.5, smooth=1e-6):
-    # Binarize at first
-    preds = (preds > threshold).float()
-    target = (target > threshold).float()
+def absolute_difference_integral(predicted, target):
+    predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2]).to(target.device)
+    target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
+    diff_integral = torch.abs(predicted_sum - target_sum).mean()
+    return diff_integral
 
-    preds_flat = preds.view(-1)
+
+def masked_mse_loss(predicted, target, mask, include_true_negatives=False):
+    mask = mask.to(predicted.device)  # Ensure mask is on the same device as predicted and target
+    target = target.to(predicted.device)  # Ensure target is on the same device as predicted
+    
+    if include_true_negatives:
+        # Apply the mask to the predicted and target tensors
+        masked_predicted = predicted * mask
+        masked_target = target * mask
+    else:
+        # Use only non-empty cells for loss calculation
+        mask = target[:, 0, :, :] > 0
+        masked_predicted = predicted[:, 0, :, :][mask]
+        masked_target = target[:, 0, :, :][mask]
+    
+    # Calculate MSE loss only on the masked regions
+    loss = nn.MSELoss()(masked_predicted, masked_target)
+    return loss
+
+def combined_loss(predicted, target, first_loss_type, include_true_negatives=False, lagrange_multiplier_pixel=1e7, lagrange_multiplier_integral=1e-5):
+    """
+    Combined loss function.
+    If the first loss type is pixel, then the combined loss is:
+        integral_loss(predicted, target) + lagrange_multiplier_pixel * masked_mse_loss(predicted, target, create_nonzero_mask(target), include_true_negatives=include_true_negatives)
+    If the first loss type is integral, then the combined loss is:
+        masked_mse_loss(predicted, target, create_nonzero_mask(target), include_true_negatives=include_true_negatives) + lagrange_multiplier_integral * integral_loss(predicted, target)
+    """
+    target = target.to(predicted.device)  # Ensure target is on the same device as predicted
+    
+    if first_loss_type == 'pixel':
+        primary_loss_value = masked_mse_loss(predicted, target, create_nonzero_mask(target).to(predicted.device), include_true_negatives=include_true_negatives)
+        secondary_loss_value = integral_loss(predicted, target)
+        return secondary_loss_value + lagrange_multiplier_pixel * primary_loss_value
+    elif first_loss_type == 'integral':
+        primary_loss_value = integral_loss(predicted, target)
+        secondary_loss_value = masked_mse_loss(predicted, target, create_nonzero_mask(target).to(predicted.device), include_true_negatives=include_true_negatives)
+        return secondary_loss_value + lagrange_multiplier_integral * primary_loss_value
+    else:
+        raise ValueError(f"Unknown first_loss_type: {first_loss_type}")
+
+
+def create_nonzero_mask(mineral_data):
+    # Create a mask where cells with any nonzero value in any mineral layer are marked as 1, others as 0
+    nonzero_mask = (mineral_data.sum(axis=1) > 0).float()
+    return nonzero_mask
+
+
+def dice_coefficient_nonzero(pred, target, threshold=0.0, smooth=1e-6):
+    pred = (pred > threshold).float().to(target.device)
+    target = (target > threshold).float().to(target.device)
+
+    pred_flat = pred.view(-1)
     target_flat = target.view(-1)
 
-    intersection = (preds_flat * target_flat).sum()
-    union = preds_flat.sum() + target_flat.sum()
+    nonzero_mask = (pred_flat + target_flat) > 0
 
-    dice = (2. * intersection + smooth) / (union + smooth)
+    pred_nonzero = pred_flat[nonzero_mask]
+    target_nonzero = target_flat[nonzero_mask]
+
+    intersection = (pred_nonzero * target_nonzero).sum()
+
+    dice = (2. * intersection + smooth) / (pred_nonzero.sum() + target_nonzero.sum() + smooth)
     return dice
 
-def plot_predictions(predicted, ground_truth, input_data, input_minerals, fault_data, output_mineral_name, num_samples=20, save_path="SweepVISB2", specs="NONE"):
+def plot_predictions(predicted, ground_truth, input_data, input_minerals, fault_data, geo_age_data, elevation_data, output_mineral_name, num_samples=20, save_path="FULLSWEEP1", specs="NONE"):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
-    
-    # Find indices where the output mineral layer is non-empty
+    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese', 'Fault', 'Min Age', 'Max Age', 'Rocktype', 'Elevation']
+
     non_empty_output_indices = np.where(np.sum(ground_truth[:, 0, :, :], axis=(1, 2)) > 0)[0]
     indices = random.sample(list(non_empty_output_indices), min(num_samples, len(non_empty_output_indices)))
-    
+
     for i, idx in enumerate(indices):
-        fig, axes = plt.subplots(2, 6, figsize=(30, 10))
-        
+        fig, axes = plt.subplots(3, 5, figsize=(30, 15))
         predicted_image = predicted[idx, 0, :, :]
         ground_truth_image = ground_truth[idx, 0, :, :]
         
-        # Plot predicted output mineral
         im1 = axes[0, 0].imshow(predicted_image, cmap='viridis')
         pred_sum = predicted_image.sum()
         axes[0, 0].set_title(f'Predicted {output_mineral_name}\nTotal: {pred_sum:.2f}')
         
-        # Plot ground truth output mineral
         im2 = axes[0, 1].imshow(ground_truth_image, cmap='viridis')
         gt_sum = ground_truth_image.sum()
         axes[0, 1].set_title(f'Ground Truth {output_mineral_name}\nTotal: {gt_sum:.2f}')
         
-        # Plot ground truth for other 9 layers
         for j, mineral_index in enumerate(input_minerals):
             layer_image = input_data[idx, mineral_index, :, :]
-            im = axes[(j + 2) // 6, (j + 2) % 6].imshow(layer_image, cmap='viridis')
+            im = axes[(j + 2) // 5, (j + 2) % 5].imshow(layer_image, cmap='viridis')
             layer_sum = layer_image.sum()
-            axes[(j + 2) // 6, (j + 2) % 6].set_title(f'{elements[mineral_index]}\nTotal: {layer_sum:.2f}')
-            fig.colorbar(im, ax=axes[(j + 2) // 6, (j + 2) % 6])
+            axes[(j + 2) // 5, (j + 2) % 5].set_title(f'{elements[mineral_index]}\nTotal: {layer_sum:.2f}')
+            fig.colorbar(im, ax=axes[(j + 2) // 5, (j + 2) % 5])
 
-        # Plot fault data
         fault_image = fault_data[idx, 0, :, :]
-        im3 = axes[1, 5].imshow(fault_image, cmap='viridis')
+        im3 = axes[2, 2].imshow(fault_image, cmap='viridis')
         fault_sum = fault_image.sum()
-        axes[1, 5].set_title(f'Fault Data\nTotal: {fault_sum:.2f}')
-        fig.colorbar(im3, ax=axes[1, 5])
+        axes[2, 2].set_title(f'Fault Data\nTotal: {fault_sum:.2f}')
+        fig.colorbar(im3, ax=axes[2, 2])
 
-        dice_value = dice_coefficient(torch.tensor(predicted_image).unsqueeze(0).unsqueeze(0), 
-                                      torch.tensor(ground_truth_image).unsqueeze(0).unsqueeze(0)).item()
+        min_age_image = geo_age_data[idx, 0, :, :]
+        im4 = axes[2, 3].imshow(min_age_image, cmap='viridis')
+        min_age_sum = min_age_image.sum()
+        axes[2, 3].set_title(f'Min Age\nTotal: {min_age_sum:.2f}')
+        fig.colorbar(im4, ax=axes[2, 3])
+
+        max_age_image = geo_age_data[idx, 1, :, :]
+        im5 = axes[2, 4].imshow(max_age_image, cmap='viridis')
+        max_age_sum = max_age_image.sum()
+        axes[2, 4].set_title(f'Max Age\nTotal: {max_age_sum:.2f}')
+        fig.colorbar(im5, ax=axes[2, 4])
+
+        rocktype_image = geo_age_data[idx, 2, :, :]
+        im6 = axes[2, 1].imshow(rocktype_image, cmap='viridis')
+        rocktype_sum = rocktype_image.sum()
+        axes[2, 1].set_title(f'Rocktype\nTotal: {rocktype_sum:.2f}')
+        fig.colorbar(im6, ax=axes[2, 1])
+
+        elevation_image = elevation_data[idx, :, :]
+        im7 = axes[2, 0].imshow(elevation_image, cmap='viridis')
+        elevation_sum = elevation_image.sum()
+        axes[2, 0].set_title(f'Elevation\nTotal: {elevation_sum:.2f}')
+        fig.colorbar(im7, ax=axes[2, 0])
+
+        dice_value = dice_coefficient_nonzero(torch.tensor(predicted_image).unsqueeze(0).unsqueeze(0), 
+                                              torch.tensor(ground_truth_image).unsqueeze(0).unsqueeze(0)).item()
         fig.suptitle(f'Sample {i} - Dice Coefficient: {dice_value:.4f}', fontsize=16)
         
         fig.colorbar(im1, ax=axes[0, 0])
@@ -93,175 +167,16 @@ def regular_loss(predicted, target):
     return nn.MSELoss()(predicted[:, 0, :, :], target[:, 0, :, :])
 
 def integral_loss(predicted, target):  # MSE ON SUMS
-    predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2])
+    predicted_sum = torch.sum(predicted[:, 0, :, :], dim=[1, 2]).to(target.device)
     target_sum = torch.sum(target[:, 0, :, :], dim=[1, 2])
     return nn.MSELoss()(predicted_sum, target_sum)
+
 
 def nonempty_loss(predicted, target):  # MSE PER PIXEL FOR NON-EMPTY
     mask = target[:, 0, :, :] > 0 
     if mask.sum() == 0:
         return torch.tensor(0.0, device=predicted.device)
     return nn.MSELoss()(predicted[:, 0, :, :][mask], target[:, 0, :, :][mask])
-
-def combined_loss(predicted, target, first_loss_type, lagrange_multiplier_pixel=1e7, lagrange_multiplier_integral=1e-5):
-    """
-    Combined loss function.
-    If the first loss type is pixel, then the combined loss is:
-        integral_loss(predicted, target) + lagrange_multiplier_pixel * pixel_loss(predicted, target)
-    If the first loss type is integral, then the combined loss is:
-        pixel_loss(predicted, target) + lagrange_multiplier_integral * integral_loss(predicted, target)
-    """
-    if first_loss_type == 'pixel':
-        primary_loss_value = regular_loss(predicted, target)
-        secondary_loss_value = integral_loss(predicted, target)
-        return secondary_loss_value + lagrange_multiplier_pixel * primary_loss_value
-    elif first_loss_type == 'integral':
-        primary_loss_value = integral_loss(predicted, target)
-        secondary_loss_value = regular_loss(predicted, target)
-        return secondary_loss_value + lagrange_multiplier_integral * primary_loss_value
-    else:
-        raise ValueError(f"Unknown first_loss_type: {first_loss_type}")
-def evaluate(model, data_loader, criterion, use_bce=False):
-    model.eval()
-    total_loss = 0
-    total_nonempty_loss = 0
-    predicted_output = []
-    output_tensor = []
-
-    with torch.no_grad():
-        for input_tensor, output in data_loader:
-            input_tensor = input_tensor.to(device)
-            output = output.to(device)
-            outputs = model(input_tensor)
-
-            if use_bce:
-                loss = criterion(outputs, output).item()
-                outputs = torch.sigmoid(outputs)  # Apply sigmoid after calculating loss
-            else:
-
-                loss = criterion(outputs, output).item()
-            
-            nonempty_loss_value = nonempty_loss(outputs, output).item()
-            total_loss += loss
-            total_nonempty_loss += nonempty_loss_value
-
-            predicted_output.append(outputs)
-            output_tensor.append(output)
-
-    avg_loss = total_loss / len(data_loader)
-    avg_nonempty_loss = total_nonempty_loss / len(data_loader)
-    predicted_output = torch.cat(predicted_output, dim=0)
-    output_tensor = torch.cat(output_tensor, dim=0)
-
-    return avg_loss, avg_nonempty_loss, predicted_output, output_tensor
-
-def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, criterion = integral_loss, two_step=False, first_loss='integral', use_bce=False):
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)  # AdamW optimizer
-
-    # if use_bce:
-    #     criterion = nn.BCEWithLogitsLoss()  # BCE with logits
-    # else:
-    #     if first_loss == 'integral':
-    #         criterion = integral_loss
-    #     else:
-    #         criterion = regular_loss
-
-    losses = []  # List to store training losses
-    test_losses = []  # List to store test losses
-    nonempty_losses = []  # List to store non-empty losses
-
-    # First step of training
-    for epoch in range(num_epochs):
-        model.train()  # Set model to training mode
-        total_loss = 0  # Initialize total loss
-        total_nonempty_loss = 0  # Initialize total non-empty loss
-
-        for input_tensor_train, output_tensor_train in train_loader:
-            input_tensor_train.requires_grad = True  # Ensure gradients are tracked
-            output_tensor_train.requires_grad = True  # Ensure gradients are tracked
-            optimizer.zero_grad()  # Zero gradients
-            outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-            if use_bce:
-                loss = criterion(outputs, output_tensor_train.to(device))
-            else:
-                loss = criterion(outputs, output_tensor_train.to(device))
-            nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))  # Calculate non-empty loss
-            loss.backward()  # Backpropagate loss
-
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
-            optimizer.step()  # Update weights
-
-            total_loss += loss.item()  # Accumulate loss
-            total_nonempty_loss += nonempty_loss_value.item()  # Accumulate non-empty loss
-
-        avg_loss = total_loss / len(train_loader)  # Average loss
-        avg_nonempty_loss = total_nonempty_loss / len(train_loader)  # Average non-empty loss
-        losses.append(avg_loss)  # Store average loss
-        test_loss, nonempty_test_loss, _, _ = evaluate(model, test_loader, criterion, use_bce=use_bce)  # Evaluate model on test set
-        test_losses.append(test_loss)  # Store test loss
-        nonempty_losses.append(nonempty_test_loss)  # Store non-empty loss
-
-        wandb.log({"Train Loss (Step 1)": avg_loss, "Test Loss (Step 1)": test_loss, "Non-Empty Train Loss (Step 1)": avg_nonempty_loss, "Non-Empty Test Loss (Step 1)": nonempty_test_loss})  # Log losses to wandb
-
-        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}')  # Print losses
-
-    # Second step of training (if two-step training is enabled)
-    if two_step:
-        for epoch in range(num_epochs):
-            model.train()  # Set model to training mode
-            total_loss = 0  # Initialize total loss
-            total_nonempty_loss = 0  # Initialize total non-empty loss
-
-            for input_tensor_train, output_tensor_train in train_loader:
-                input_tensor_train.requires_grad = True  # Ensure gradients are tracked
-                output_tensor_train.requires_grad = True  # Ensure gradients are tracked
-                optimizer.zero_grad()  # Zero gradients
-                outputs = model(input_tensor_train.to(device))  # Pass only the input tensor
-                if use_bce:
-                    loss = criterion(outputs, output_tensor_train.to(device))
-                else:
-                    loss = combined_loss(outputs, output_tensor_train.to(device), first_loss)  # Calculate combined loss
-                nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))  # Calculate non-empty loss
-                loss.backward()  # Backpropagate loss
-
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
-                optimizer.step()  # Update weights
-
-                total_loss += loss.item()  # Accumulate loss
-                total_nonempty_loss += nonempty_loss_value.item()  # Accumulate non-empty loss
-
-            avg_loss = total_loss / len(train_loader)  # Average loss
-            avg_nonempty_loss = total_nonempty_loss / len(train_loader)  # Average non-empty loss
-            losses.append(avg_loss)  # Store average loss
-
-            test_loss, nonempty_test_loss, _, _ = evaluate(model, test_loader, lambda p, t: combined_loss(p, t, first_loss), use_bce=use_bce)  # Evaluate model on test set
-            test_losses.append(test_loss)  # Store test loss
-            nonempty_losses.append(nonempty_test_loss)  # Store non-empty loss
-
-            wandb.log({"Train Loss (Step 2)": avg_loss, "Test Loss (Step 2)": test_loss, "Non-Empty Train Loss (Step 2)": avg_nonempty_loss, "Non-Empty Test Loss (Step 2)": nonempty_test_loss})  # Log losses to wandb
-
-            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}')  # Print losses
-
-    # Evaluate final model on test set
-    final_criterion = lambda p, t: combined_loss(p, t, first_loss) if two_step else criterion(p, t)
-    test_loss, nonempty_test_loss, predicted_output_test, output_tensor_test = evaluate(model, test_loader, final_criterion, use_bce=use_bce)
-
-    print(f'Final Test Loss: {test_loss}, Non-Empty Test Loss: {nonempty_test_loss}')
-
-    # Plot training and test loss curves
-    plt.plot(losses, label='Train Loss')
-    plt.plot(test_losses, label='Test Loss')
-    plt.plot(nonempty_losses, label='Non-Empty Test Loss')
-    plt.title('Loss Curve')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-    plt.savefig('trainingVis/loss_curve.png')
-    plt.close()
-
-    wandb.save('trainingVis/loss_curve.png')  # Save loss curve plot to wandb
-
-    return predicted_output_test, output_tensor_test
 
 def weighted_mse_loss(pred, target, weight):
     return torch.mean(weight * (pred - target) ** 2)
