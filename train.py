@@ -108,6 +108,9 @@ config = {
 
 # python train.py --grid_size 50 --hidden_dim 256 --intermediate_dim 512 --num_minerals 11 --nhead 4 --num_layers 1 --d_model 256 --dropout_rate 0.2 --model_type u --output_mineral_name Nickel --learning_rate 0.00001 --num_epochs 10 --loss1 integral --two_step True --logName testB2 --use_bce
 
+torch.manual_seed(set_seed)
+np.random.seed(set_seed)
+random.seed(set_seed)
 
 # Initialize wandb
 wandb.init(project="mineral_transformer_project", name=lognameoutput, config=config)

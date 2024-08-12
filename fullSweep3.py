@@ -4,16 +4,16 @@ import subprocess
 
 learning_rates = [0.00001, 0.0001, 0.001]
 batch_sizes = [64]
-model_types = ['u', 'lc']
-minerals = ['Gold', 'Nickel']
+model_types = ['lc', 'u']
+minerals = ['Nickel', 'Gold']
 loss_schemes = [
     {'two_step': True, 'first_loss': 'integral'}, 
     {'two_step': True, 'first_loss': 'pixel'}, 
     {'two_step': False, 'first_loss': 'integral'}, 
     {'two_step': False, 'first_loss': 'pixel'}
 ]
-tn_flags = [False, True]
-seeds = [42, 123]
+tn_flags = [True, False]
+seeds = [42]
 epochs = 20
 
 # Generate commands
