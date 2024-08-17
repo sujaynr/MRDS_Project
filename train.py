@@ -6,6 +6,8 @@ import h5py
 import numpy as np
 import random
 import geopandas as gpd
+import plotly.graph_objs as go
+import plotly.offline as pyo
 
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.functional import structural_similarity_index_measure as ssim
@@ -40,6 +42,7 @@ parser.add_argument('--use_bce', action='store_true', help='Use binary cross-ent
 parser.add_argument('--tn', action='store_true', help='Include true negatives in the evaluation.')
 parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training.')
 parser.add_argument('--set_seed', type=int, default=42, help='Set seed for reproducibility.')
+parser.add_argument('--use_raca', action='store_true', help='Use RaCA data for training.')
 
 args = parser.parse_args()
 
@@ -62,6 +65,7 @@ use_bce = args.use_bce
 tn = args.tn
 batch_size = args.batch_size
 set_seed = args.set_seed
+use_raca = args.use_raca
 
 print("Configuration Summary:")
 print(f"  Grid Size: {grid_size}")
@@ -82,6 +86,7 @@ print(f"  Use BCE Loss: {use_bce}")
 print(f"  Include True Negatives: {tn}")
 print(f"  Batch Size: {batch_size}")
 print(f"  Set Seed: {set_seed}")
+print(f"  Use RaCA Data: {use_raca}")
 
 # Set log name:
 lognameoutput = args.logName
@@ -103,7 +108,8 @@ config = {
     "use_bce": use_bce,
     "include_true_negatives": tn,
     "batch_size": batch_size,
-    "set_seed": set_seed
+    "set_seed": set_seed,
+    "use_raca": use_raca
 }
 
 # python train.py --grid_size 50 --hidden_dim 256 --intermediate_dim 512 --num_minerals 11 --nhead 4 --num_layers 1 --d_model 256 --dropout_rate 0.2 --model_type u --output_mineral_name Nickel --learning_rate 0.00001 --num_epochs 10 --loss1 integral --two_step True --logName testB2 --use_bce
@@ -117,33 +123,68 @@ wandb.init(project="mineral_transformer_project", name=lognameoutput, config=con
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load data from HDF5 file
+
+from mpl_toolkits.mplot3d import Axes3D
+
+# Function to visualize 16 layers as a stacked map
+def visualize_layers(layers, layer_names, output_path):
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+
+    x = np.linspace(0, 1, layers[0].shape[1])
+    y = np.linspace(0, 1, layers[0].shape[0])
+    x, y = np.meshgrid(x, y)
+
+    for i, (layer, name) in enumerate(zip(layers, layer_names)):
+        z = np.full_like(layer, i)
+        ax.plot_surface(x, y, z, rstride=1, cstride=1, facecolors=plt.cm.viridis(layer), shade=False, alpha=0.7)
+        ax.text2D(0.05, 0.95 - 0.05 * i, name, transform=ax.transAxes)
+
+    ax.set_xlabel('X axis')
+    ax.set_ylabel('Y axis')
+    ax.set_zlabel('Layer index')
+    ax.view_init(elev=30, azim=30)
+
+    plt.title("Stacked Layer Visualization")
+    plt.savefig(output_path)
+    plt.close(fig)
+
+
+
 h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
 fault_file_path = 'prepared_data_TILES/faultData.h5'
 geoAge_file_path = 'prepared_data_TILES/geoAge.h5'
 elevation_file_path = '/home/sujaynair/MRDS_Project/all_elevations.h5'
+raca_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/racagrids.h5'
 
+# Load data from the HDF5 files
 with h5py.File(h5_file_path, 'r') as f:
     coords = f['coordinates'][:]
     counts = f['counts'][:]
     qualities = f['qualities'][:]
+
 with h5py.File(fault_file_path, 'r') as f:
     fault_data = f['faults'][:]
+
 with h5py.File(geoAge_file_path, 'r') as f:
     geoAge_data = f['geoinfo'][:]
+
 with h5py.File(elevation_file_path, 'r') as f:
     elevations = f['elevations'][:]
 
-############################################
+with h5py.File(raca_file_path, 'r') as f:
+    raca_data = f['racagrids'][:]
+
+# Normalize layers (min_age, max_age, and elevation)
 def normalize_layer(layer):
     min_val = np.min(layer)
     max_val = np.max(layer)
     return (layer - min_val) / (max_val - min_val)
 
-# Extract minage and maxage layers
+# Normalize minage and maxage layers
 min_age_layer = geoAge_data[:, 0, :, :]
 max_age_layer = geoAge_data[:, 1, :, :]
 
-# Normalize minage and maxage layers
 normalized_min_age_layer = normalize_layer(min_age_layer)
 normalized_max_age_layer = normalize_layer(max_age_layer)
 
@@ -151,22 +192,122 @@ normalized_max_age_layer = normalize_layer(max_age_layer)
 geoAge_data[:, 0, :, :] = normalized_min_age_layer
 geoAge_data[:, 1, :, :] = normalized_max_age_layer
 
+# Normalize elevations
 normalized_elevations = normalize_layer(elevations)
 
-# Concatenate fault data and normalized geoAge data to counts
+# Expand the dimensions of fault and elevation data for concatenation
 fault_slice = fault_data[:, 0, :, :]
 fault_slice_expanded = np.expand_dims(fault_slice, axis=1)
 elevation_slice_expanded = np.expand_dims(normalized_elevations, axis=1)
 
-
+# Concatenate fault data and normalized geoAge data to counts
 counts = np.concatenate((counts, fault_slice_expanded), axis=1)
 print(f"Counts shape after adding faults: {counts.shape}")
+
+# Replace NaNs with a specific value in counts
 counts = np.nan_to_num(counts, nan=-10)
+
 counts = np.concatenate((counts, geoAge_data), axis=1)
 print(f"Counts shape after adding geoAge_data: {counts.shape}")
+
 counts = np.concatenate((counts, elevation_slice_expanded), axis=1)
 print(f"Counts shape after adding elevation data: {counts.shape}")
+
+if use_raca:
+    # Expand dimensions of RaCA data for concatenation (assuming RaCA grids are of shape (10000, 50, 50))
+    raca_data_expanded = np.expand_dims(raca_data, axis=1)
+
+    # Concatenate the RaCA data to counts
+    counts = np.concatenate((counts, raca_data_expanded), axis=1)
+    print(f"Counts shape after adding RaCA data: {counts.shape}")
+    num_minerals += 1
+
 ########################################################
+
+gold_layer = counts[:, 0, :, :]
+
+# Find the index of the square with the most gold
+gold_sums = np.sum(gold_layer, axis=(1, 2))  # Sum across the 50x50 grid
+max_gold_index = np.argmax(gold_sums)
+
+print(f"Square with the most gold is at index {max_gold_index} with a total gold sum of {gold_sums[max_gold_index]}")
+
+layers_to_visualize = [
+    counts[max_gold_index, i, :, :] for i in range(10)
+] + [
+    fault_slice_expanded[max_gold_index, 0, :, :],
+    normalized_min_age_layer[max_gold_index, :, :],
+    normalized_max_age_layer[max_gold_index, :, :],
+    elevation_slice_expanded[max_gold_index, 0, :, :],
+    raca_data[max_gold_index, :, :]
+]
+
+layer_names = [
+    "Gold", "Silver", "Zinc", "Lead", "Copper", 
+    "Nickel", "Iron", "Uranium", "Tungsten", "Manganese",
+    "Faults", "GeoAge Min", "GeoAge Max", 
+    "Elevation", "RaCA Data"
+]
+
+# Create a 3D interactive plot with Plotly
+fig = go.Figure()
+
+x, y = np.meshgrid(np.linspace(0, 1, 50), np.linspace(0, 1, 50))
+
+# Add the layers to the figure
+for i, (layer, name) in enumerate(zip(layers_to_visualize, layer_names)):
+    z = np.full_like(layer, i)  # Each layer is placed at a different z level
+    fig.add_trace(
+        go.Surface(
+            z=z, x=x, y=y, surfacecolor=layer, name=name,
+            colorscale='Viridis', opacity=0.7, showscale=False, visible=True
+        )
+    )
+
+# Add checkboxes to toggle the visibility of each layer
+fig.update_layout(
+    title=f"3D Visualization of Layers for Square {max_gold_index} (High Gold Content)",
+    scene=dict(
+        xaxis_title='X axis',
+        yaxis_title='Y axis',
+        zaxis_title='Layers',
+        zaxis=dict(
+            tickvals=list(range(len(layer_names))),  # Set tick values to match the number of layers
+            ticktext=layer_names,  # Set tick text to the layer names
+            tickmode='array'  # Ensure that the tick mode is set to an array
+        )
+    ),
+    updatemenus=[
+        dict(
+            buttons=list(
+                [
+                    dict(
+                        args=[{'visible': [i == j for i in range(len(layer_names))]}],
+                        label=layer_names[j],
+                        method='update'
+                    ) for j in range(len(layer_names))
+                ] + [
+                    dict(
+                        args=[{'visible': [True] * len(layer_names)}],
+                        label='Show All',
+                        method='update'
+                    ),
+                    dict(
+                        args=[{'visible': [False] * len(layer_names)}],
+                        label='Hide All',
+                        method='update'
+                    )
+                ]
+            ),
+            direction="down",
+            showactive=True,
+        )
+    ],
+    margin=dict(l=0, r=0, b=0, t=50)
+)
+
+# Save and display the figure
+pyo.plot(fig, filename='high_gold_square_visualization_with_checkboxes.html')
 binary_counts = (counts > 0).astype(np.float32)
 
 
