@@ -1,75 +1,112 @@
+import numpy as np
 import pandas as pd
 import h5py
-import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
-import seaborn as sns
-import pdb
-# Define file paths
-file1 = "/home/sujaynair/MRDS_Project/RaCA_DATA/ICLRDataset_RaCAFullDataset_AA_v1.pkl"
-file2 = "/home/sujaynair/MRDS_Project/RaCA_DATA/ICLRDataset_RaCAFullDatasetAux_AA_v1.pkl"
-mineral_file = '/home/sujaynair/MRDS_Project/prepared_data_TILES/mineralDataWithCoords.h5'
-output_file = '/home/sujaynair/MRDS_Project/prepared_data_TILES/processed_cells.h5'
-plot_file = '/home/sujaynair/MRDS_Project/prepared_data_TILES/average_wavelength_intensity.png'
 
-# Load data from pickle files
-full = pd.read_pickle(file1)
-aux = pd.read_pickle(file2)
-pdb.set_trace()
-# Load coordinates from the h5 file
-with h5py.File(mineral_file, 'r') as f:
+# Haversine function to calculate bird's-eye distance between two lat/long points
+def haversine(lon1, lat1, lon2, lat2):
+    R = 3958.8  # Radius of Earth in miles
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lambda = np.radians(lon2 - lon1)
+    a = np.sin(delta_phi / 2.0)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lambda / 2.0)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    return R * c
+
+# Load reflectance data
+reflectance_df = pd.read_pickle("/home/sujaynair/MRDS_Project/RaCA_DATA/ICLRDataset_RaCAFullDataset_AA_v1.pkl")
+
+# Load coordinates and mineral data
+h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
+with h5py.File(h5_file_path, 'r') as f:
     coords = f['coordinates'][:]
+    counts = f['counts'][:]
 
-# Get the list of wavelength columns
-wavelength_cols = [str(i) for i in range(365, 2501)]
-num_wavelengths = len(wavelength_cols)
-num_cells_per_square = 50 * 50  # 2500
+# Select the mineral index (e.g., 0 for Nickel)
+layer_names = [
+    "Gold", "Silver", "Zinc", "Lead", "Copper", 
+    "Nickel", "Iron", "Uranium", "Tungsten", "Manganese",
+    "Faults", "GeoAge Min", "GeoAge Max", 
+    "Elevation", "RaCA Data"
+]
 
-# Function to calculate new latitude and longitude given a distance in miles
-def calculate_lat_long(lat, long, miles_lat, miles_long):
-    # Convert miles to degrees (approximate conversion)
-    miles_to_deg = 1 / 69  # 1 degree latitude is approximately 69 miles
-    new_lat = lat + (miles_lat * miles_to_deg)
-    new_long = long + (miles_long * miles_to_deg / np.cos(np.deg2rad(lat)))
-    return new_lat, new_long
+# Number of random squares to select
+num_squares = min(50, len(coords))
 
-# Initialize a 3D numpy array to store the results
-num_squares = 10000
-results = np.zeros((num_squares, num_cells_per_square, num_wavelengths))
+# Randomly sample the square indices
+random_indices = np.random.choice(len(coords), num_squares, replace=False)
 
-# Loop through the first 5 squares
-for square_index, (square_lat, square_long) in enumerate(coords[:num_squares]):
-    print(f"\nProcessing square {square_index + 1}")
-    for i in range(50):
-        for j in range(50):
-            cell_index = i * 50 + j
-            cell_lat, cell_long = calculate_lat_long(square_lat, square_long, i, j)
-            # Find all scans within this cell
-            cell_scans = full[(full['lat'].between(cell_lat, cell_lat + 1/69)) & 
-                              (full['long'].between(cell_long, cell_long + 1/(69 * np.cos(np.deg2rad(cell_lat)))))]
-            
-            if not cell_scans.empty:
-                # Average the wavelength columns
-                avg_vector = cell_scans[wavelength_cols].mean().values
-                results[square_index, cell_index, :] = avg_vector
-            # If no scans, the cell remains zeroed
-            
-            print(f"Processed cell ({i}, {j}) in square {square_index + 1} with {len(cell_scans)} scans.")
+# Initialize a list to store R² scores across all sites
+all_r2_scores = []
 
-# Save the processed data to an HDF5 file
-with h5py.File(output_file, 'w') as f:
-    f.create_dataset('processed_data', data=results)
-    pdb.set_trace()
-print(f"\nProcessed data saved to {output_file}")
+for mineral_index in range(10):
+    mineral = layer_names[mineral_index]
+    
+    # Iterate over the selected random grid squares
+    for i in random_indices:
+        coord = coords[i]
+        
+        # Check if the current square has any of the selected mineral
+        if counts[i, mineral_index, :, :].sum() > 0:
+            print(f"Processing square {i+1}/{len(coords)} with mineral occurrences")
 
-# Compute the mean intensity across all squares and cells
-mean_intensity = np.mean(results, axis=(0, 1))
+            # Iterate over each cell in the 50x50 grid within the square
+            for row in range(50):
+                for col in range(50):
+                    if counts[i, mineral_index, row, col] > 0:  # If mineral is present in this cell
+                        # Calculate the lat/long of the cell within the square
+                        lat = coord[0] + (row / 50) * 50 / 69.0  # Approximate lat degree change per mile
+                        lon = coord[1] + (col / 50) * 50 / (69.0 * np.cos(np.radians(lat)))  # Approximate lon degree change per mile
 
-# Plotting the result
-plt.figure(figsize=(12, 8))
-sns.heatmap(mean_intensity.reshape(1, -1), cmap='viridis', cbar_kws={'label': 'Average Wavelength Intensity'})
-plt.title('Heatmap of Averaged Wavelength Intensity')
-plt.xlabel('Wavelength')
-plt.ylabel('Intensity')
-plt.savefig(plot_file)
-print(f"Plot saved to {plot_file}")
-plt.show()
+                        # Calculate distances from each RaCA site to the current mineral occurrence
+                        reflectance_df['distance_to_resource'] = reflectance_df.apply(
+                            lambda row: haversine(lon, lat, row['long'], row['lat']), axis=1)
+
+                        # Drop rows with NaN values in the distance
+                        reflectance_df = reflectance_df.dropna(subset=['distance_to_resource'])
+
+                        # Initialize a list to store R² values for the current occurrence
+                        r2_scores = []
+
+                        for wavelength in range(365, 2501):
+                            # Prepare data for linear regression
+                            X = reflectance_df['distance_to_resource'].values.reshape(-1, 1)
+                            y = reflectance_df[str(wavelength)].values
+
+                            # Remove NaN values
+                            mask = ~np.isnan(X.flatten()) & ~np.isnan(y)
+                            X, y = X[mask], y[mask]
+
+                            # Perform linear regression
+                            if len(X) > 0:
+                                model = LinearRegression().fit(X, y)
+                                predictions = model.predict(X)
+                                r2 = r2_score(y, predictions)
+                            else:
+                                r2 = np.nan
+
+                            r2_scores.append(r2)
+
+                        # Store the R² values for the current cell within the square
+                        all_r2_scores.append(r2_scores)
+
+            print(f"Finished processing square {i+1}/{len(coords)}")
+
+    # After processing all squares, calculate the average R² values across all occurrences
+    average_r2_scores = np.nanmean(all_r2_scores, axis=0)
+    print("Finished averaging R² scores across all occurrences.")
+
+    # Plot R^2 values as a function of wavelength
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(365, 2501), average_r2_scores, label=f'Average R^2 vs Wavelength ({mineral})')
+    plt.xlabel('Wavelength (nm)')
+    plt.ylabel('R^2')
+    plt.title(f'Average R^2 of Reflectance vs. Distance to {mineral} Resources Across All Occurrences')
+    plt.grid(True)
+    plt.legend()
+    plt.savefig(f'Average_R2_vs_Wavelength_{mineral}.png')
+    plt.show()
+    print(f"Plot saved as 'Average_R2_vs_Wavelength_{mineral}.png'.")

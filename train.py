@@ -67,6 +67,8 @@ batch_size = args.batch_size
 set_seed = args.set_seed
 use_raca = args.use_raca
 
+include_silver = True  # Set this to True if you want to include the silver layer
+
 print("Configuration Summary:")
 print(f"  Grid Size: {grid_size}")
 print(f"  Hidden Dimension: {hidden_dim}")
@@ -87,6 +89,7 @@ print(f"  Include True Negatives: {tn}")
 print(f"  Batch Size: {batch_size}")
 print(f"  Set Seed: {set_seed}")
 print(f"  Use RaCA Data: {use_raca}")
+print(f"  Include Silver Layer: {include_silver}")
 
 # Set log name:
 lognameoutput = args.logName
@@ -109,10 +112,9 @@ config = {
     "include_true_negatives": tn,
     "batch_size": batch_size,
     "set_seed": set_seed,
-    "use_raca": use_raca
+    "use_raca": use_raca,
+    "include_silver": include_silver
 }
-
-# python train.py --grid_size 50 --hidden_dim 256 --intermediate_dim 512 --num_minerals 11 --nhead 4 --num_layers 1 --d_model 256 --dropout_rate 0.2 --model_type u --output_mineral_name Nickel --learning_rate 0.00001 --num_epochs 10 --loss1 integral --two_step True --logName testB2 --use_bce
 
 torch.manual_seed(set_seed)
 np.random.seed(set_seed)
@@ -123,33 +125,6 @@ wandb.init(project="mineral_transformer_project", name=lognameoutput, config=con
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load data from HDF5 file
-
-from mpl_toolkits.mplot3d import Axes3D
-
-# Function to visualize 16 layers as a stacked map
-def visualize_layers(layers, layer_names, output_path):
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
-
-    x = np.linspace(0, 1, layers[0].shape[1])
-    y = np.linspace(0, 1, layers[0].shape[0])
-    x, y = np.meshgrid(x, y)
-
-    for i, (layer, name) in enumerate(zip(layers, layer_names)):
-        z = np.full_like(layer, i)
-        ax.plot_surface(x, y, z, rstride=1, cstride=1, facecolors=plt.cm.viridis(layer), shade=False, alpha=0.7)
-        ax.text2D(0.05, 0.95 - 0.05 * i, name, transform=ax.transAxes)
-
-    ax.set_xlabel('X axis')
-    ax.set_ylabel('Y axis')
-    ax.set_zlabel('Layer index')
-    ax.view_init(elev=30, azim=30)
-
-    plt.title("Stacked Layer Visualization")
-    plt.savefig(output_path)
-    plt.close(fig)
-
-
 
 h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
 fault_file_path = 'prepared_data_TILES/faultData.h5'
@@ -224,145 +199,43 @@ if use_raca:
 
 ########################################################
 
-gold_layer = counts[:, 0, :, :]
+# If statement to exclude silver layer if include_silver is False
+if not include_silver:
+    elements = ['Gold', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']  # 9 layers
+else:
+    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']  # 10 layers
 
-# Find the index of the square with the most gold
-gold_sums = np.sum(gold_layer, axis=(1, 2))  # Sum across the 50x50 grid
-max_gold_index = np.argmax(gold_sums)
+# Add the additional layers to the elements list
+elements.extend(['Fault', 'GeoAge Min', 'GeoAge Max', 'Elevation'])  # 4 more layers, bringing the total to 13 or 14
 
-print(f"Square with the most gold is at index {max_gold_index} with a total gold sum of {gold_sums[max_gold_index]}")
+if use_raca:
+    elements.append('RaCA')  # This would make it 14 or 15 layers
 
-layers_to_visualize = [
-    counts[max_gold_index, i, :, :] for i in range(10)
-] + [
-    fault_slice_expanded[max_gold_index, 0, :, :],
-    normalized_min_age_layer[max_gold_index, :, :],
-    normalized_max_age_layer[max_gold_index, :, :],
-    elevation_slice_expanded[max_gold_index, 0, :, :],
-    raca_data[max_gold_index, :, :]
-]
+# Adjust plotting and other logic based on the actual number of layers
+actual_num_layers = counts.shape[1]
 
-layer_names = [
-    "Gold", "Silver", "Zinc", "Lead", "Copper", 
-    "Nickel", "Iron", "Uranium", "Tungsten", "Manganese",
-    "Faults", "GeoAge Min", "GeoAge Max", 
-    "Elevation", "RaCA Data"
-]
+print(f"Actual number of layers: {actual_num_layers}")
+print(f"Elements list has {len(elements)} layers")
 
-# Create a 3D interactive plot with Plotly
-fig = go.Figure()
+# Ensure the elements list matches the actual number of layers
+elements = elements[:actual_num_layers]
 
-x, y = np.meshgrid(np.linspace(0, 1, 50), np.linspace(0, 1, 50))
-
-# Add the layers to the figure
-for i, (layer, name) in enumerate(zip(layers_to_visualize, layer_names)):
-    z = np.full_like(layer, i)  # Each layer is placed at a different z level
-    fig.add_trace(
-        go.Surface(
-            z=z, x=x, y=y, surfacecolor=layer, name=name,
-            colorscale='Viridis', opacity=0.7, showscale=False, visible=True
-        )
-    )
-
-# Add checkboxes to toggle the visibility of each layer
-fig.update_layout(
-    title=f"3D Visualization of Layers for Square {max_gold_index} (High Gold Content)",
-    scene=dict(
-        xaxis_title='X axis',
-        yaxis_title='Y axis',
-        zaxis_title='Layers',
-        zaxis=dict(
-            tickvals=list(range(len(layer_names))),  # Set tick values to match the number of layers
-            ticktext=layer_names,  # Set tick text to the layer names
-            tickmode='array'  # Ensure that the tick mode is set to an array
-        )
-    ),
-    updatemenus=[
-        dict(
-            buttons=list(
-                [
-                    dict(
-                        args=[{'visible': [i == j for i in range(len(layer_names))]}],
-                        label=layer_names[j],
-                        method='update'
-                    ) for j in range(len(layer_names))
-                ] + [
-                    dict(
-                        args=[{'visible': [True] * len(layer_names)}],
-                        label='Show All',
-                        method='update'
-                    ),
-                    dict(
-                        args=[{'visible': [False] * len(layer_names)}],
-                        label='Hide All',
-                        method='update'
-                    )
-                ]
-            ),
-            direction="down",
-            showactive=True,
-        )
-    ],
-    margin=dict(l=0, r=0, b=0, t=50)
-)
-
-# Save and display the figure
-pyo.plot(fig, filename='high_gold_square_visualization_with_checkboxes.html')
-binary_counts = (counts > 0).astype(np.float32)
-
-
-num_samples = len(counts)
-num_test_samples = int(num_samples * 0.1)
-test_indices = np.arange(num_test_samples)
-train_indices = np.arange(num_test_samples, num_samples)
-
-
-shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
-output_path = '/home/sujaynair/MRDS_Project/tilingVIS/trainValVIS.png'
-us_shapefile = gpd.read_file(shapefile_path)
-us_shape = us_shapefile[us_shapefile['ADMIN'] == 'United States of America']
-def miles_to_degrees_lat(miles):
-    return miles / 69.0
-
-def miles_to_degrees_lon(miles, latitude):
-    return miles / (69.0 * np.cos(np.radians(latitude)))
-
-# Visualize the squares
-def visualize_squares_with_coords(coords, train_indices, test_indices, us_shape, output_path):
-    fig, ax = plt.subplots(figsize=(15, 10))
-    us_shape.boundary.plot(ax=ax, color='black')
-    
-    # Plot train squares
-    for idx in train_indices:
-        lat_start, lon_start = coords[idx]
-        circle = plt.Circle((lon_start, lat_start), miles_to_degrees_lon(5, lat_start), color='blue', alpha=0.3, edgecolor='none')
-        ax.add_patch(circle)
-    
-    # Plot test squares
-    for idx in test_indices:
-        lat_start, lon_start = coords[idx]
-        circle = plt.Circle((lon_start, lat_start), miles_to_degrees_lon(5, lat_start), color='red', alpha=0.3, edgecolor='none')
-        ax.add_patch(circle)
-    
-    # Add legend
-    train_patch = plt.Circle((0, 0), 1, color='blue', alpha=0.3, edgecolor='none')
-    test_patch = plt.Circle((0, 0), 1, color='red', alpha=0.3, edgecolor='none')
-    ax.legend([train_patch, test_patch], ['Train Squares', 'Test Squares'], loc='upper right')
-    
-    plt.title("Train and Test Squares Mapped on US")
-    plt.savefig(output_path)
-    plt.close(fig)
-# visualize_squares_with_coords(coords, train_indices, test_indices, us_shape, output_path)
-# assert(False)
-
-elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
 output_mineral = elements.index(output_mineral_name)
 input_minerals = [i for i in range(len(elements)) if i != output_mineral]
+
+
 
 print("Layer mapping to elements:")
 for i, element in enumerate(elements):
     print(f"Layer {i}: {element}")
 print(f"Output Mineral: {output_mineral_name} (Layer {output_mineral})")
+
+# Define train and test indices
+num_samples = len(counts)
+num_test_samples = int(num_samples * 0.1)
+test_indices = np.arange(num_test_samples)
+train_indices = np.arange(num_test_samples, num_samples)
+
 use_unet_padding = False
 if model_type == "u":
     use_unet_padding = True
@@ -373,12 +246,8 @@ else:
     train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=use_unet_padding)
     test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=use_unet_padding)
 
-
-
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-
 
 if model_type == "tc":
     model = TransformerToConv(input_dim=num_minerals * grid_size * grid_size, hidden_dim=hidden_dim, 
@@ -476,7 +345,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
             "Dice Coefficient (Train)": avg_dice_coef,
             "Dice Coefficient (Test)": test_dice_coef
         })
-        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {test_dice_coef}')
+        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
 
     if two_step:
         for epoch in range(num_epochs):
@@ -533,7 +402,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
                 "Dice Coefficient (Train)": avg_dice_coef,
                 "Dice Coefficient (Test)": test_dice_coef
             })
-            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {test_dice_coef}')
+            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
 
     final_criterion = lambda p, t: combined_loss(p, t, first_loss, include_true_negatives=include_true_negatives) if two_step else criterion(p, t)
     test_loss, nonempty_test_loss, predicted_output_test, output_tensor_test, final_diff_integral, final_dice_coef = evaluate(model, test_loader, final_criterion, use_bce=use_bce, include_true_negatives=include_true_negatives)

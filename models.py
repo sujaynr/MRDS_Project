@@ -107,7 +107,7 @@ class LinToConv(nn.Module): ############################### ARCH 1
         self.fc2 = nn.Linear(intermediate_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, grid_size * grid_size)
         
-        self.conv1 = nn.Conv2d(in_channels=16, out_channels=hidden_dim, kernel_size=3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels=15, out_channels=hidden_dim, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(in_channels=hidden_dim, out_channels=1, kernel_size=3, padding=1)
         
         self.relu = nn.ReLU()
