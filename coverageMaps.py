@@ -53,8 +53,8 @@ def create_coverage_map(element_index, element_name, coords, counts, raca_data, 
         heatmap_raca = np.zeros((grid_size, grid_size))
 
         # Get random indices for minerals
-        mineral_indices = random.sample(range(len(coords)), 100)
-        raca_indices = random.sample(range(len(coords)), 100)
+        mineral_indices = random.sample(range(len(coords)), 5000)
+        raca_indices = random.sample(range(len(coords)), 5000)
 
         # Update heatmap arrays
         for idx in mineral_indices:
@@ -91,8 +91,8 @@ def create_coverage_map(element_index, element_name, coords, counts, raca_data, 
 
     else:
         # Get random indices for minerals
-        mineral_indices = random.sample(range(len(coords)), 100)
-        raca_indices = random.sample(range(len(coords)), 100)
+        mineral_indices = random.sample(range(len(coords)), 5000)
+        raca_indices = random.sample(range(len(coords)), 5000)
 
         # Plot random mineral data
         for idx in mineral_indices:

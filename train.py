@@ -5,38 +5,31 @@ import torch.optim as optim
 import h5py
 import numpy as np
 import random
-import geopandas as gpd
-import plotly.graph_objs as go
-import plotly.offline as pyo
-
-from torch.utils.data import Dataset, DataLoader
-from torchmetrics.functional import structural_similarity_index_measure as ssim
-import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter
-import os
-import pdb
 import wandb
-import segmentation_models_pytorch as smp
+from torch.utils.data import Dataset, DataLoader
+import pdb
+import matplotlib.pyplot as plt
+import os
 
 from models import LinToConv, SimplifiedMLP, LinToTransformer, MineralDataset, UNet, TransformerToConv
 from utils import plot_predictions, integral_loss, regular_loss, nonempty_loss, combined_loss, dice_coefficient_nonzero, create_nonzero_mask, masked_mse_loss, absolute_difference_integral
 
-
+# Argument parser setup
 parser = argparse.ArgumentParser(description="Train a model for mineral prediction.")
 parser.add_argument('--grid_size', type=int, default=50, help='Grid size of the input data.')
 parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension for the models.')
 parser.add_argument('--intermediate_dim', type=int, default=512, help='Intermediate dimension for additional layers.')
-parser.add_argument('--num_minerals', type=int, default=15, help='Number of dimensions.')
+parser.add_argument('--num_minerals', type=int, default=15, help='Number of input dimensions (minerals).')
 parser.add_argument('--nhead', type=int, default=4, help='Number of heads in the multihead attention models.')
 parser.add_argument('--num_layers', type=int, default=1, help='Number of layers in the transformer.')
 parser.add_argument('--d_model', type=int, default=256, help='Model dimension for the transformer.')
 parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for the models.')
-parser.add_argument('--model_type', type=str, default='u', choices=['tc', 'u', 'lc', 'lt', 'l'], help='Model type: tc (TransformerToConv), u (UNet), lc (LinToConv), lt (LinToTransformer), l (SimplifiedMLP).')
+parser.add_argument('--model_type', type=str, default='u', choices=['tc', 'u', 'lc', 'lt', 'l'], help='Model type.')
 parser.add_argument('--output_mineral_name', type=str, default='Nickel', help='Name of the output mineral.')
 parser.add_argument('--learning_rate', type=float, default=0.00001, help='Learning rate for training.')
 parser.add_argument('--num_epochs', type=int, default=10, help='Number of epochs for training.')
 parser.add_argument('--loss1', type=str, default='integral', help='First loss function.')
-parser.add_argument('--two_step', type=str, default=True, help='Whether to use two-step training.')
+parser.add_argument('--two_step', type=str, default='True', help='Whether to use two-step training.')
 parser.add_argument('--logName', type=str, default='testB3', help='Name of the log file.')
 parser.add_argument('--use_bce', action='store_true', help='Use binary cross-entropy loss for resource presence detection.')
 parser.add_argument('--tn', action='store_true', help='Include true negatives in the evaluation.')
@@ -47,271 +40,135 @@ parser.add_argument('--use_raca', action='store_true', help='Use RaCA data for t
 args = parser.parse_args()
 
 # Configuration
-grid_size = args.grid_size
-hidden_dim = args.hidden_dim
-intermediate_dim = args.intermediate_dim
-num_minerals = args.num_minerals
-nhead = args.nhead
-num_layers = args.num_layers
-d_model = args.d_model
-dropout_rate = args.dropout_rate
-model_type = args.model_type
-output_mineral_name = args.output_mineral_name
-learning_rate = args.learning_rate
-num_epochs = args.num_epochs
-first_loss = args.loss1
-two_step = (args.two_step == 'True')
-use_bce = args.use_bce
-tn = args.tn
-batch_size = args.batch_size
-set_seed = args.set_seed
-use_raca = args.use_raca
-
-include_silver = True  # Set this to True if you want to include the silver layer
-
-print("Configuration Summary:")
-print(f"  Grid Size: {grid_size}")
-print(f"  Hidden Dimension: {hidden_dim}")
-print(f"  Intermediate Dimension: {intermediate_dim}")
-print(f"  Number of Minerals: {num_minerals}")
-print(f"  Number of Heads: {nhead}")
-print(f"  Number of Layers: {num_layers}")
-print(f"  Model Dimension: {d_model}")
-print(f"  Dropout Rate: {dropout_rate}")
-print(f"  Model Type: {model_type}")
-print(f"  Output Mineral Name: {output_mineral_name}")
-print(f"  Learning Rate: {learning_rate}")
-print(f"  Number of Epochs: {num_epochs}")
-print(f"  First Loss Function: {first_loss}")
-print(f"  Two-Step Training: {two_step}")
-print(f"  Use BCE Loss: {use_bce}")
-print(f"  Include True Negatives: {tn}")
-print(f"  Batch Size: {batch_size}")
-print(f"  Set Seed: {set_seed}")
-print(f"  Use RaCA Data: {use_raca}")
-print(f"  Include Silver Layer: {include_silver}")
-
-# Set log name:
-lognameoutput = args.logName
-config = {
-    "grid_size": grid_size,
-    "hidden_dim": hidden_dim,
-    "intermediate_dim": intermediate_dim,
-    "num_minerals": num_minerals,
-    "nhead": nhead,
-    "num_layers": num_layers,
-    "d_model": d_model,
-    "dropout_rate": dropout_rate,
-    "model_type": model_type,
-    "output_mineral_name": output_mineral_name,
-    "learning_rate": learning_rate,
-    "num_epochs": num_epochs,
-    "first_loss": first_loss,
-    "two_step": two_step,
-    "use_bce": use_bce,
-    "include_true_negatives": tn,
-    "batch_size": batch_size,
-    "set_seed": set_seed,
-    "use_raca": use_raca,
-    "include_silver": include_silver
-}
-
-torch.manual_seed(set_seed)
-np.random.seed(set_seed)
-random.seed(set_seed)
-
-# Initialize wandb
-wandb.init(project="mineral_transformer_project", name=lognameoutput, config=config)
+torch.manual_seed(args.set_seed)
+np.random.seed(args.set_seed)
+random.seed(args.set_seed)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Load data from HDF5 file
+config = vars(args)
+wandb.init(project="mineral_transformer_project", name=args.logName, config=config)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Paths to HDF5 files
 h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
 fault_file_path = 'prepared_data_TILES/faultData.h5'
 geoAge_file_path = 'prepared_data_TILES/geoAge.h5'
 elevation_file_path = '/home/sujaynair/MRDS_Project/all_elevations.h5'
-raca_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/racagrids.h5'
+raca_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/racagridsFILLED.h5'
 
-# Load data from the HDF5 files
-with h5py.File(h5_file_path, 'r') as f:
-    coords = f['coordinates'][:]
-    counts = f['counts'][:]
-    qualities = f['qualities'][:]
+# Function to load datasets from HDF5 files
+def load_hdf5_data(file_path, dataset_name):
+    with h5py.File(file_path, 'r') as f:
+        data = f[dataset_name][:]
+    return data
 
-with h5py.File(fault_file_path, 'r') as f:
-    fault_data = f['faults'][:]
-
-with h5py.File(geoAge_file_path, 'r') as f:
-    geoAge_data = f['geoinfo'][:]
-
-with h5py.File(elevation_file_path, 'r') as f:
-    elevations = f['elevations'][:]
-
-with h5py.File(raca_file_path, 'r') as f:
-    raca_data = f['racagrids'][:]
-
-# Normalize layers (min_age, max_age, and elevation)
+# Function to normalize layers
 def normalize_layer(layer):
     min_val = np.min(layer)
     max_val = np.max(layer)
     return (layer - min_val) / (max_val - min_val)
 
-# Normalize minage and maxage layers
-min_age_layer = geoAge_data[:, 0, :, :]
-max_age_layer = geoAge_data[:, 1, :, :]
+# Load datasets
+coords = load_hdf5_data(h5_file_path, 'coordinates')
+counts = load_hdf5_data(h5_file_path, 'counts')
+fault_data = load_hdf5_data(fault_file_path, 'faults')
+geoAge_data = load_hdf5_data(geoAge_file_path, 'geoinfo')
+elevations = load_hdf5_data(elevation_file_path, 'elevations')
 
-normalized_min_age_layer = normalize_layer(min_age_layer)
-normalized_max_age_layer = normalize_layer(max_age_layer)
+if args.use_raca:
+    # pdb.set_trace()
+    raca_data = load_hdf5_data(raca_file_path, 'aggregated_output')
+    print(f"Loaded RaCA data with shape: {raca_data.shape}")
 
-# Replace the original layers with the normalized layers
-geoAge_data[:, 0, :, :] = normalized_min_age_layer
-geoAge_data[:, 1, :, :] = normalized_max_age_layer
-
-# Normalize elevations
+# Normalize geoAge and elevation layers
+geoAge_data[:, 0, :, :] = normalize_layer(geoAge_data[:, 0, :, :])
+geoAge_data[:, 1, :, :] = normalize_layer(geoAge_data[:, 1, :, :])
 normalized_elevations = normalize_layer(elevations)
 
-# Expand the dimensions of fault and elevation data for concatenation
-fault_slice = fault_data[:, 0, :, :]
-fault_slice_expanded = np.expand_dims(fault_slice, axis=1)
+# Expand dimensions for concatenation
+fault_slice_expanded = np.expand_dims(fault_data[:, 0, :, :], axis=1)
 elevation_slice_expanded = np.expand_dims(normalized_elevations, axis=1)
 
-# Concatenate fault data and normalized geoAge data to counts
-counts = np.concatenate((counts, fault_slice_expanded), axis=1)
-print(f"Counts shape after adding faults: {counts.shape}")
+# Concatenate datasets
+counts = np.concatenate((counts, fault_slice_expanded, geoAge_data, elevation_slice_expanded), axis=1)
+counts = np.nan_to_num(counts, nan=-10)  # Replace NaNs with a specific value
 
-# Replace NaNs with a specific value in counts
-counts = np.nan_to_num(counts, nan=-10)
-
-counts = np.concatenate((counts, geoAge_data), axis=1)
-print(f"Counts shape after adding geoAge_data: {counts.shape}")
-
-counts = np.concatenate((counts, elevation_slice_expanded), axis=1)
-print(f"Counts shape after adding elevation data: {counts.shape}")
-
-if use_raca:
-    # Expand dimensions of RaCA data for concatenation (assuming RaCA grids are of shape (10000, 50, 50))
-    raca_data_expanded = np.expand_dims(raca_data, axis=1)
-
-    # Concatenate the RaCA data to counts
+if args.use_raca:
+    raca_data_expanded = np.transpose(raca_data, (0, 3, 1, 2))
     counts = np.concatenate((counts, raca_data_expanded), axis=1)
     print(f"Counts shape after adding RaCA data: {counts.shape}")
-    num_minerals += 1
+    args.num_minerals += 64
 
-########################################################
+# Define the list of elements
+elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
 
-# If statement to exclude silver layer if include_silver is False
-if not include_silver:
-    elements = ['Gold', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']  # 9 layers
-else:
-    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']  # 10 layers
+if False: # FIX LATER 
+    elements.remove('Silver')
 
-# Add the additional layers to the elements list
-elements.extend(['Fault', 'GeoAge Min', 'GeoAge Max', 'Elevation'])  # 4 more layers, bringing the total to 13 or 14
+elements.extend(['Fault', 'GeoAge Min', 'GeoAge Max', 'Elevation'])
 
-if use_raca:
-    elements.append('RaCA')  # This would make it 14 or 15 layers
+if args.use_raca:
+    elements.extend([f'RaCA_{i+1}' for i in range(64)])
 
-# Adjust plotting and other logic based on the actual number of layers
 actual_num_layers = counts.shape[1]
-
-print(f"Actual number of layers: {actual_num_layers}")
-print(f"Elements list has {len(elements)} layers")
-
-# Ensure the elements list matches the actual number of layers
 elements = elements[:actual_num_layers]
 
-output_mineral = elements.index(output_mineral_name)
+output_mineral = elements.index(args.output_mineral_name)
 input_minerals = [i for i in range(len(elements)) if i != output_mineral]
 
-
-
-print("Layer mapping to elements:")
-for i, element in enumerate(elements):
-    print(f"Layer {i}: {element}")
-print(f"Output Mineral: {output_mineral_name} (Layer {output_mineral})")
-
-# Define train and test indices
+# Train/test split
 num_samples = len(counts)
 num_test_samples = int(num_samples * 0.1)
 test_indices = np.arange(num_test_samples)
 train_indices = np.arange(num_test_samples, num_samples)
 
-use_unet_padding = False
-if model_type == "u":
-    use_unet_padding = True
-if use_bce:
-    train_dataset = MineralDataset(binary_counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=use_unet_padding)
-    test_dataset = MineralDataset(binary_counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=use_unet_padding)
-else:
-    train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=use_unet_padding)
-    test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=use_unet_padding)
+# Setup
+train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=(args.model_type == "u"))
+test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=(args.model_type == "u"))
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-if model_type == "tc":
-    model = TransformerToConv(input_dim=num_minerals * grid_size * grid_size, hidden_dim=hidden_dim, 
-                              intermediate_dim=intermediate_dim, d_model=d_model, nhead=nhead, 
-                              num_layers=num_layers, dropout_rate=dropout_rate)
-elif model_type == "u":
-    model = UNet(in_channels=num_minerals, out_channels=1)
-elif model_type == "lc":
-    model = LinToConv(input_dim=num_minerals * grid_size * grid_size, hidden_dim=hidden_dim, intermediate_dim=intermediate_dim)
-elif model_type == "lt":
-    model = LinToTransformer(input_dim=num_minerals * grid_size * grid_size, hidden_dim=hidden_dim, 
-                             intermediate_dim=intermediate_dim, d_model=d_model, nhead=nhead, 
-                             num_layers=num_layers, dropout_rate=dropout_rate)
-elif model_type == "l":
-    model = SimplifiedMLP(input_dim=num_minerals * grid_size * grid_size, hidden_dim=hidden_dim)
+# Model selection
+if args.model_type == "tc":
+    model = TransformerToConv(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
+                              intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
+                              num_layers=args.num_layers, dropout_rate=args.dropout_rate)
+elif args.model_type == "u":
+    model = UNet(in_channels=args.num_minerals, out_channels=1)
+elif args.model_type == "lc":
+    model = LinToConv(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, intermediate_dim=args.intermediate_dim)
+elif args.model_type == "lt":
+    model = LinToTransformer(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
+                             intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
+                             num_layers=args.num_layers, dropout_rate=args.dropout_rate)
+elif args.model_type == "l":
+    model = SimplifiedMLP(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim)
 else:
-    raise ValueError(f"Unknown model type: {model_type}")
+    raise ValueError(f"Unknown model type: {args.model_type}")
 
 model = model.to(device)
-# pdb.set_trace()
-def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001, criterion=integral_loss, two_step=False, first_loss='integral', use_bce=False, include_true_negatives=False):
+
+def train(model, train_loader, test_loader, num_epochs, learning_rate, criterion, two_step=False, first_loss='integral', use_bce=False, include_true_negatives=False):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-    
     if use_bce:
         criterion = nn.BCEWithLogitsLoss()
-    else:
-        if first_loss == 'integral':
-            criterion = integral_loss
-        else:
-            criterion = regular_loss
-    
-    losses = []
-    test_losses = []
-    nonempty_losses = []
-    diff_integrals = []
-    dice_coefs = []
+
+    losses, test_losses, nonempty_losses, diff_integrals, dice_coefs = [], [], [], [], []
 
     for epoch in range(num_epochs):
         model.train()
-        total_loss = 0
-        total_nonempty_loss = 0
-        total_diff_integral = 0
-        total_dice_coef = 0
-        num_batches = 0
+        total_loss, total_nonempty_loss, total_diff_integral, total_dice_coef, num_batches = 0, 0, 0, 0, 0
 
-        for input_tensor_train, output_tensor_train in train_loader:
-            input_tensor_train.requires_grad = True
-            output_tensor_train.requires_grad = True
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
 
-            outputs = model(input_tensor_train.to(device))
-
-            if use_bce:
-                loss = criterion(outputs, output_tensor_train.to(device))
-            else:
-                if first_loss == 'integral':
-                    loss = criterion(outputs, output_tensor_train.to(device))
-                else:
-                    mask = create_nonzero_mask(output_tensor_train).to(device)
-                    loss = masked_mse_loss(outputs, output_tensor_train, mask, include_true_negatives=include_true_negatives)
-
-            nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))
-            diff_integral = absolute_difference_integral(outputs, output_tensor_train).item()
-            dice_coef = dice_coefficient_nonzero(outputs, output_tensor_train).item()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            nonempty_loss_value = nonempty_loss(outputs, targets)
+            diff_integral = absolute_difference_integral(outputs, targets).item()
+            dice_coef = dice_coefficient_nonzero(outputs, targets).item()
 
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -345,39 +202,29 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
             "Dice Coefficient (Train)": avg_dice_coef,
             "Dice Coefficient (Test)": test_dice_coef
         })
+
         print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
 
     if two_step:
         for epoch in range(num_epochs):
             model.train()
-            total_loss = 0
-            total_nonempty_loss = 0
-            total_diff_integral = 0
-            total_dice_coef = 0
-            num_batches = 0
+            total_loss, total_nonempty_loss, total_diff_integral, total_dice_coef, num_batches = 0, 0, 0, 0, 0
 
-            for input_tensor_train, output_tensor_train in train_loader:
-                input_tensor_train.requires_grad = True
+            for inputs, targets in train_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
                 optimizer.zero_grad()
-                outputs = model(input_tensor_train.to(device))
 
-                if use_bce:
-                    loss = criterion(outputs, output_tensor_train.to(device))
-                else:
-                    loss = combined_loss(outputs, output_tensor_train, first_loss, include_true_negatives=include_true_negatives)
-                
-                nonempty_loss_value = nonempty_loss(outputs, output_tensor_train.to(device))
-                diff_integral = absolute_difference_integral(outputs, output_tensor_train).item()
-                dice_coef = dice_coefficient_nonzero(outputs, output_tensor_train).item()
+                outputs = model(inputs)
+                loss = combined_loss(outputs, targets, first_loss, include_true_negatives=include_true_negatives)
 
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 total_loss += loss.item()
-                total_nonempty_loss += nonempty_loss_value.item()
-                total_diff_integral += diff_integral
-                total_dice_coef += dice_coef
+                total_nonempty_loss += nonempty_loss(outputs, targets).item()
+                total_diff_integral += absolute_difference_integral(outputs, targets).item()
+                total_dice_coef += dice_coefficient_nonzero(outputs, targets).item()
                 num_batches += 1
 
             avg_loss = total_loss / num_batches
@@ -402,6 +249,7 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
                 "Dice Coefficient (Train)": avg_dice_coef,
                 "Dice Coefficient (Test)": test_dice_coef
             })
+
             print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
 
     final_criterion = lambda p, t: combined_loss(p, t, first_loss, include_true_negatives=include_true_negatives) if two_step else criterion(p, t)
@@ -413,6 +261,67 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
     wandb.log(final_train_metrics)
     wandb.log(final_test_metrics)
 
+    plot_training_curves(losses, test_losses, nonempty_losses, diff_integrals, dice_coefs)
+
+    return predicted_output_test, output_tensor_test
+
+def evaluate(model, data_loader, criterion, use_bce=False, include_true_negatives=False):
+    model.eval()
+    total_loss, total_nonempty_loss, total_diff_integral, total_dice_coef, num_batches = 0, 0, 0, 0, 0
+    predicted_output, output_tensor = [], []
+
+    with torch.no_grad():
+        for inputs, targets in data_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+
+            loss = criterion(outputs, targets).item()
+            nonempty_loss_value = nonempty_loss(outputs, targets).item()
+            diff_integral = absolute_difference_integral(outputs, targets).item()
+            dice_coef = dice_coefficient_nonzero(outputs, targets).item()
+
+            total_loss += loss
+            total_nonempty_loss += nonempty_loss_value
+            total_diff_integral += diff_integral
+            total_dice_coef += dice_coef
+            num_batches += 1
+
+            predicted_output.append(outputs)
+            output_tensor.append(targets)
+
+    avg_loss = total_loss / num_batches
+    avg_nonempty_loss = total_nonempty_loss / num_batches
+    avg_diff_integral = total_diff_integral / num_batches
+    avg_dice_coef = total_dice_coef / num_batches
+
+    predicted_output = torch.cat(predicted_output, dim=0)
+    output_tensor = torch.cat(output_tensor, dim=0)
+
+    return avg_loss, avg_nonempty_loss, predicted_output, output_tensor, avg_diff_integral, avg_dice_coef
+
+def compute_metrics(data_loader, model, criterion, use_bce, include_true_negatives):
+    model.eval()
+    total_dice_coef, total_diff_integral, total_nonempty_mse, total_pixel_mse, num_batches = 0, 0, 0, 0, 0
+
+    with torch.no_grad():
+        for inputs, targets in data_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+
+            total_dice_coef += dice_coefficient_nonzero(outputs, targets).item()
+            total_diff_integral += absolute_difference_integral(outputs, targets).item()
+            total_nonempty_mse += nonempty_loss(outputs, targets).item()
+            total_pixel_mse += regular_loss(outputs, targets).item()
+            num_batches += 1
+
+    return {
+        "Avg Dice Coefficient": total_dice_coef / num_batches,
+        "Avg Difference in Integral": total_diff_integral / num_batches,
+        "Avg Non-Empty MSE": total_nonempty_mse / num_batches,
+        "Avg Pixel MSE": total_pixel_mse / num_batches
+    }
+
+def plot_training_curves(losses, test_losses, nonempty_losses, diff_integrals, dice_coefs):
     plt.plot(losses, label='Train Loss')
     plt.plot(test_losses, label='Test Loss')
     plt.plot(nonempty_losses, label='Non-Empty Test Loss')
@@ -424,119 +333,29 @@ def train(model, train_loader, test_loader, num_epochs=50, learning_rate=0.0001,
     plt.legend()
     plt.savefig('trainingVis/loss_curve.png')
     plt.close()
-
     wandb.save('trainingVis/loss_curve.png')
-    return predicted_output_test, output_tensor_test
 
+if __name__ == "__main__":
+    predicted_output_test, output_tensor_test = train(
+        model, train_loader, test_loader, 
+        num_epochs=args.num_epochs, 
+        learning_rate=args.learning_rate, 
+        criterion=integral_loss if args.loss1 == "integral" else regular_loss, 
+        two_step=args.two_step == 'True', 
+        first_loss=args.loss1, 
+        use_bce=args.use_bce, 
+        include_true_negatives=args.tn
+    )
 
-def evaluate(model, data_loader, criterion, use_bce=False, include_true_negatives=False):
-    model.eval()
-    total_loss = 0
-    total_nonempty_loss = 0
-    total_diff_integral = 0
-    total_dice_coef = 0
-    num_batches = 0
-    predicted_output = []
-    output_tensor = []
+    # Crop the 64x64 outputs back to 50x50
+    crop_size = (50, 50)
+    predicted_output_test = predicted_output_test[:, :, 0:crop_size[0], 0:crop_size[1]]
+    output_tensor_test = output_tensor_test[:, :, 0:crop_size[0], 0:crop_size[1]]
 
-    with torch.no_grad():
-        for input_tensor, output in data_loader:
-            input_tensor = input_tensor.to(device)
-            output = output.to(device)
-            outputs = model(input_tensor)
+    batch_size = predicted_output_test.shape[0]
+    predicted_np_test = predicted_output_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
+    output_np_test = output_tensor_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
 
-            if use_bce:
-                loss = criterion(outputs, output).item()
-                outputs = torch.sigmoid(outputs)
-            else:
-                if include_true_negatives:
-                    mask = create_nonzero_mask(output)
-                    loss = masked_mse_loss(outputs, output, mask, include_true_negatives=True).item()
-                else:
-                    loss = criterion(outputs, output).item()
-
-            nonempty_loss_value = nonempty_loss(outputs, output).item()
-            diff_integral = absolute_difference_integral(outputs, output).item()
-            dice_coef = dice_coefficient_nonzero(outputs, output).item()
-
-            total_loss += loss
-            total_nonempty_loss += nonempty_loss_value
-            total_diff_integral += diff_integral
-            total_dice_coef += dice_coef
-            num_batches += 1
-
-            predicted_output.append(outputs)
-            output_tensor.append(output)
-
-    avg_loss = total_loss / num_batches
-    avg_nonempty_loss = total_nonempty_loss / num_batches
-    avg_diff_integral = total_diff_integral / num_batches
-    avg_dice_coef = total_dice_coef / num_batches
-    predicted_output = torch.cat(predicted_output, dim=0)
-    output_tensor = torch.cat(output_tensor, dim=0)
-
-    return avg_loss, avg_nonempty_loss, predicted_output, output_tensor, avg_diff_integral, avg_dice_coef
-
-def compute_metrics(data_loader, model, criterion, use_bce, include_true_negatives):
-    model.eval()
-    total_dice_coef = 0.0
-    total_diff_integral = 0.0
-    total_nonempty_mse = 0.0
-    total_pixel_mse = 0.0
-    num_batches = 0
-
-    with torch.no_grad():
-        for input_tensor, output_tensor in data_loader:
-            input_tensor = input_tensor.to(device)
-            output_tensor = output_tensor.to(device)
-            outputs = model(input_tensor)
-
-            dice_coef = dice_coefficient_nonzero(outputs, output_tensor).item()
-            diff_integral = absolute_difference_integral(outputs, output_tensor).item()
-            nonempty_mse = nonempty_loss(outputs, output_tensor).item()
-            pixel_mse = regular_loss(outputs, output_tensor).item()
-
-            total_dice_coef += dice_coef
-            total_diff_integral += diff_integral
-            total_nonempty_mse += nonempty_mse
-            total_pixel_mse += pixel_mse
-            num_batches += 1
-
-    avg_dice_coef = total_dice_coef / num_batches
-    avg_diff_integral = total_diff_integral / num_batches
-    avg_nonempty_mse = total_nonempty_mse / num_batches
-    avg_pixel_mse = total_pixel_mse / num_batches
-
-    metrics = {
-        "Avg Dice Coefficient": avg_dice_coef,
-        "Avg Difference in Integral": avg_diff_integral,
-        "Avg Non-Empty MSE": avg_nonempty_mse,
-        "Avg Pixel MSE": avg_pixel_mse
-    }
-
-    return metrics
-
-if use_bce:
-    criterion = nn.BCEWithLogitsLoss()
-else:
-    if first_loss == "integral":
-        criterion = integral_loss
-    else:
-        criterion = regular_loss
-
-predicted_output_test, output_tensor_test = train(model, train_loader, test_loader, num_epochs=num_epochs, learning_rate=learning_rate, criterion=criterion, two_step=two_step, first_loss=first_loss, use_bce=use_bce, include_true_negatives=tn)
-
-# Crop the 64x64 outputs back to 50x50
-crop_size = (50, 50)
-predicted_output_test = predicted_output_test[:, :, 0:crop_size[0], 0:crop_size[1]]
-output_tensor_test = output_tensor_test[:, :, 0:crop_size[0], 0:crop_size[1]]
-
-# After the training process, reshape tensors back to the original shape for visualization and metric computation
-batch_size = predicted_output_test.shape[0]
-predicted_np_test = predicted_output_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
-output_np_test = output_tensor_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
-
-print(f"Predicted Test Shape: {predicted_np_test.shape}")
-print(f"Output Test Shape: {output_np_test.shape}")
-
-plot_predictions(predicted_np_test, output_np_test, counts[test_indices], input_minerals, fault_data[test_indices], geoAge_data[test_indices], elevations[test_indices], elements[output_mineral], num_samples=20, specs=lognameoutput)
+    print(f"Predicted Test Shape: {predicted_np_test.shape}")
+    print(f"Output Test Shape: {output_np_test.shape}")
+    plot_predictions(predicted_np_test, output_np_test, counts[test_indices], input_minerals, fault_data[test_indices], geoAge_data[test_indices], elevations[test_indices], elements[output_mineral], num_samples=20, specs=args.logName)
