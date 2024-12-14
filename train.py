@@ -7,15 +7,16 @@ import numpy as np
 import random
 import wandb
 from torch.utils.data import Dataset, DataLoader
-import pdb
 import matplotlib.pyplot as plt
 import os
 
 from models import LinToConv, SimplifiedMLP, LinToTransformer, MineralDataset, UNet, TransformerToConv
-from utils import plot_predictions, integral_loss, regular_loss, nonempty_loss, combined_loss, dice_coefficient_nonzero, create_nonzero_mask, masked_mse_loss, absolute_difference_integral
+from utils import (plot_predictions, integral_loss, regular_loss, nonempty_loss, 
+                   combined_loss, dice_coefficient_nonzero, create_nonzero_mask, 
+                   masked_mse_loss, absolute_difference_integral)
 
 # Argument parser setup
-parser = argparse.ArgumentParser(description="Train a model for mineral prediction.")
+parser = argparse.ArgumentParser(description="Train a model for mineral prediction and save two models.")
 parser.add_argument('--grid_size', type=int, default=50, help='Grid size of the input data.')
 parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension for the models.')
 parser.add_argument('--intermediate_dim', type=int, default=512, help='Intermediate dimension for additional layers.')
@@ -36,7 +37,6 @@ parser.add_argument('--tn', action='store_true', help='Include true negatives in
 parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training.')
 parser.add_argument('--set_seed', type=int, default=42, help='Set seed for reproducibility.')
 parser.add_argument('--use_raca', action='store_true', help='Use RaCA data for training.')
-
 args = parser.parse_args()
 
 # Configuration
@@ -54,100 +54,38 @@ h5_file_path = 'prepared_data_TILES/mineralDataWithCoords.h5'
 fault_file_path = 'prepared_data_TILES/faultData.h5'
 geoAge_file_path = 'prepared_data_TILES/geoAge.h5'
 elevation_file_path = '/home/sujaynair/MRDS_Project/all_elevations.h5'
-raca_file_path = '/home/sujaynair/MRDS_Project/prepared_data_TILES/racagridsFILLED.h5'
 
-# Function to load datasets from HDF5 files
+# Load datasets function
 def load_hdf5_data(file_path, dataset_name):
     with h5py.File(file_path, 'r') as f:
         data = f[dataset_name][:]
     return data
 
-# Function to normalize layers
+# Normalize function
 def normalize_layer(layer):
     min_val = np.min(layer)
     max_val = np.max(layer)
     return (layer - min_val) / (max_val - min_val)
 
-# Load datasets
-coords = load_hdf5_data(h5_file_path, 'coordinates')
-counts = load_hdf5_data(h5_file_path, 'counts')
-fault_data = load_hdf5_data(fault_file_path, 'faults')
-geoAge_data = load_hdf5_data(geoAge_file_path, 'geoinfo')
-elevations = load_hdf5_data(elevation_file_path, 'elevations')
-
-if args.use_raca:
-    # pdb.set_trace()
-    raca_data = load_hdf5_data(raca_file_path, 'aggregated_output')
-    print(f"Loaded RaCA data with shape: {raca_data.shape}")
-
-# Normalize geoAge and elevation layers
-geoAge_data[:, 0, :, :] = normalize_layer(geoAge_data[:, 0, :, :])
-geoAge_data[:, 1, :, :] = normalize_layer(geoAge_data[:, 1, :, :])
-normalized_elevations = normalize_layer(elevations)
-
-# Expand dimensions for concatenation
-fault_slice_expanded = np.expand_dims(fault_data[:, 0, :, :], axis=1)
-elevation_slice_expanded = np.expand_dims(normalized_elevations, axis=1)
-
-# Concatenate datasets
-counts = np.concatenate((counts, fault_slice_expanded, geoAge_data, elevation_slice_expanded), axis=1)
-counts = np.nan_to_num(counts, nan=-10)  # Replace NaNs with a specific value
-
-if args.use_raca:
-    raca_data_expanded = np.transpose(raca_data, (0, 3, 1, 2))
-    counts = np.concatenate((counts, raca_data_expanded), axis=1)
-    print(f"Counts shape after adding RaCA data: {counts.shape}")
-    args.num_minerals += 64
-
-# Define the list of elements
-elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
-
-if False: # FIX LATER 
-    elements.remove('Silver')
-
-elements.extend(['Fault', 'GeoAge Min', 'GeoAge Max', 'Elevation'])
-
-if args.use_raca:
-    elements.extend([f'RaCA_{i+1}' for i in range(64)])
-
-actual_num_layers = counts.shape[1]
-elements = elements[:actual_num_layers]
-
-output_mineral = elements.index(args.output_mineral_name)
-input_minerals = [i for i in range(len(elements)) if i != output_mineral]
-
-# Train/test split
-num_samples = len(counts)
-num_test_samples = int(num_samples * 0.1)
-test_indices = np.arange(num_test_samples)
-train_indices = np.arange(num_test_samples, num_samples)
-
-# Setup
-train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=(args.model_type == "u"))
-test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=(args.model_type == "u"))
-
-train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
-
-# Model selection
-if args.model_type == "tc":
-    model = TransformerToConv(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
-                              intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
-                              num_layers=args.num_layers, dropout_rate=args.dropout_rate)
-elif args.model_type == "u":
-    model = UNet(in_channels=args.num_minerals, out_channels=1)
-elif args.model_type == "lc":
-    model = LinToConv(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, intermediate_dim=args.intermediate_dim)
-elif args.model_type == "lt":
-    model = LinToTransformer(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
-                             intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
-                             num_layers=args.num_layers, dropout_rate=args.dropout_rate)
-elif args.model_type == "l":
-    model = SimplifiedMLP(input_dim=args.num_minerals * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim)
-else:
-    raise ValueError(f"Unknown model type: {args.model_type}")
-
-model = model.to(device)
+def create_model(args, num_channels):
+    if args.model_type == "tc":
+        model = TransformerToConv(input_dim=num_channels * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
+                                  intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
+                                  num_layers=args.num_layers, dropout_rate=args.dropout_rate)
+    elif args.model_type == "u":
+        model = UNet(in_channels=num_channels, out_channels=1)
+    elif args.model_type == "lc":
+        model = LinToConv(input_dim=num_channels * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, intermediate_dim=args.intermediate_dim)
+    elif args.model_type == "lt":
+        model = LinToTransformer(input_dim=num_channels * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim, 
+                                 intermediate_dim=args.intermediate_dim, d_model=args.d_model, nhead=args.nhead, 
+                                 num_layers=args.num_layers, dropout_rate=args.dropout_rate)
+    elif args.model_type == "l":
+        model = SimplifiedMLP(input_dim=num_channels * args.grid_size * args.grid_size, hidden_dim=args.hidden_dim)
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
+    model = model.to(device)
+    return model
 
 def train(model, train_loader, test_loader, num_epochs, learning_rate, criterion, two_step=False, first_loss='integral', use_bce=False, include_true_negatives=False):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
@@ -156,6 +94,7 @@ def train(model, train_loader, test_loader, num_epochs, learning_rate, criterion
 
     losses, test_losses, nonempty_losses, diff_integrals, dice_coefs = [], [], [], [], []
 
+    # Step 1 training
     for epoch in range(num_epochs):
         model.train()
         total_loss, total_nonempty_loss, total_diff_integral, total_dice_coef, num_batches = 0, 0, 0, 0, 0
@@ -203,8 +142,9 @@ def train(model, train_loader, test_loader, num_epochs, learning_rate, criterion
             "Dice Coefficient (Test)": test_dice_coef
         })
 
-        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
+        print(f'Epoch {epoch+1}/{num_epochs} (Step 1), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {test_dice_coef}')
 
+    # Step 2 training if enabled
     if two_step:
         for epoch in range(num_epochs):
             model.train()
@@ -250,7 +190,7 @@ def train(model, train_loader, test_loader, num_epochs, learning_rate, criterion
                 "Dice Coefficient (Test)": test_dice_coef
             })
 
-            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {avg_dice_coef}')
+            print(f'Epoch {epoch+1}/{num_epochs} (Step 2), Train Loss: {avg_loss}, Test Loss: {test_loss}, Non-Empty Train Loss: {avg_nonempty_loss}, Non-Empty Test Loss: {nonempty_test_loss}, Difference in Integrals (Train): {avg_diff_integral}, Difference in Integrals (Test): {test_diff_integral}, Dice Coefficient (Train): {avg_dice_coef}, Dice Coefficient (Test): {test_dice_coef}')
 
     final_criterion = lambda p, t: combined_loss(p, t, first_loss, include_true_negatives=include_true_negatives) if two_step else criterion(p, t)
     test_loss, nonempty_test_loss, predicted_output_test, output_tensor_test, final_diff_integral, final_dice_coef = evaluate(model, test_loader, final_criterion, use_bce=use_bce, include_true_negatives=include_true_negatives)
@@ -286,8 +226,8 @@ def evaluate(model, data_loader, criterion, use_bce=False, include_true_negative
             total_dice_coef += dice_coef
             num_batches += 1
 
-            predicted_output.append(outputs)
-            output_tensor.append(targets)
+            predicted_output.append(outputs.cpu())
+            output_tensor.append(targets.cpu())
 
     avg_loss = total_loss / num_batches
     avg_nonempty_loss = total_nonempty_loss / num_batches
@@ -331,31 +271,109 @@ def plot_training_curves(losses, test_losses, nonempty_losses, diff_integrals, d
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
+    os.makedirs('trainingVis', exist_ok=True)
     plt.savefig('trainingVis/loss_curve.png')
     plt.close()
     wandb.save('trainingVis/loss_curve.png')
 
 if __name__ == "__main__":
+    # Load base minerals-only data
+    coords = load_hdf5_data(h5_file_path, 'coordinates')
+    counts = load_hdf5_data(h5_file_path, 'counts') # minerals only initially
+    counts = np.nan_to_num(counts, nan=-10)
+
+    # Define elements (minerals)
+    # Adjust based on actual available minerals:
+    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese']
+    # Find output mineral based on args
+    output_mineral = elements.index(args.output_mineral_name)
+    input_minerals = [i for i in range(len(elements)) if i != output_mineral]
+
+    # Train/test split
+    num_samples = len(counts)
+    num_test_samples = int(num_samples * 0.1)
+    test_indices = np.arange(num_test_samples)
+    train_indices = np.arange(num_test_samples, num_samples)
+
+    # First run: Only minerals (no geophysical, no RACA)
+    # No hardcoding epochs, rely on args.num_epochs
+    args.use_raca = False
+    actual_num_layers = counts.shape[1] 
+    elements = elements[:actual_num_layers]
+
+    train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=(args.model_type == "u"))
+    test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=(args.model_type == "u"))
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+
+    model = create_model(args, actual_num_layers)
+    first_criterion = integral_loss if args.loss1 == "integral" else regular_loss
+
     predicted_output_test, output_tensor_test = train(
         model, train_loader, test_loader, 
         num_epochs=args.num_epochs, 
         learning_rate=args.learning_rate, 
-        criterion=integral_loss if args.loss1 == "integral" else regular_loss, 
-        two_step=args.two_step == 'True', 
+        criterion=first_criterion, 
+        two_step=(args.two_step == 'True'), 
         first_loss=args.loss1, 
         use_bce=args.use_bce, 
         include_true_negatives=args.tn
     )
 
-    # Crop the 64x64 outputs back to 50x50
-    crop_size = (50, 50)
-    predicted_output_test = predicted_output_test[:, :, 0:crop_size[0], 0:crop_size[1]]
-    output_tensor_test = output_tensor_test[:, :, 0:crop_size[0], 0:crop_size[1]]
+    # Save the first model (minerals-only)
+    torch.save(model.state_dict(), "model_minerals_only.pth")
 
-    batch_size = predicted_output_test.shape[0]
-    predicted_np_test = predicted_output_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
-    output_np_test = output_tensor_test.cpu().numpy().reshape(batch_size, 1, crop_size[0], crop_size[1])
+    # Second run: Minerals + geophysical (no RACA)
+    counts = load_hdf5_data(h5_file_path, 'counts')
+    fault_data = load_hdf5_data(fault_file_path, 'faults')
+    geoAge_data = load_hdf5_data(geoAge_file_path, 'geoinfo')
+    elevations = load_hdf5_data(elevation_file_path, 'elevations')
 
-    print(f"Predicted Test Shape: {predicted_np_test.shape}")
-    print(f"Output Test Shape: {output_np_test.shape}")
-    plot_predictions(predicted_np_test, output_np_test, counts[test_indices], input_minerals, fault_data[test_indices], geoAge_data[test_indices], elevations[test_indices], elements[output_mineral], num_samples=20, specs=args.logName)
+    # Normalize and prepare geophysical data
+    geoAge_data[:, 0, :, :] = normalize_layer(geoAge_data[:, 0, :, :])
+    geoAge_data[:, 1, :, :] = normalize_layer(geoAge_data[:, 1, :, :])
+    normalized_elevations = normalize_layer(elevations)
+
+    fault_slice_expanded = np.expand_dims(fault_data[:, 0, :, :], axis=1)
+    elevation_slice_expanded = np.expand_dims(normalized_elevations, axis=1)
+
+    # Concatenate minerals + geophysical
+    counts = np.concatenate((counts, fault_slice_expanded, geoAge_data, elevation_slice_expanded), axis=1)
+    counts = np.nan_to_num(counts, nan=-10)
+
+    # Update elements list with geophysical layers:
+    # Assuming 10 minerals + Fault + GeoAge Min + GeoAge Max + Elevation = 14 channels total
+    # Adjust if needed based on actual data
+    elements = ['Gold', 'Silver', 'Zinc', 'Lead', 'Copper', 'Nickel', 'Iron', 'Uranium', 'Tungsten', 'Manganese',
+                'Fault', 'GeoAge Min', 'GeoAge Max', 'Elevation']
+
+    actual_num_layers = counts.shape[1]
+    output_mineral = elements.index(args.output_mineral_name)
+    input_minerals = [i for i in range(len(elements)) if i != output_mineral]
+
+    train_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=train_indices, train=True, unet=(args.model_type == "u"))
+    test_dataset = MineralDataset(counts, input_minerals, output_mineral, indices=test_indices, train=False, unet=(args.model_type == "u"))
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+
+    # No hardcoding epochs, rely on args.num_epochs
+    args.use_raca = False
+    model = create_model(args, actual_num_layers)
+
+    predicted_output_test, output_tensor_test = train(
+        model, train_loader, test_loader, 
+        num_epochs=args.num_epochs, 
+        learning_rate=args.learning_rate, 
+        criterion=first_criterion, 
+        two_step=(args.two_step == 'True'), 
+        first_loss=args.loss1, 
+        use_bce=args.use_bce, 
+        include_true_negatives=args.tn
+    )
+
+    # Save the second model (minerals+geophysical)
+    torch.save(model.state_dict(), "model_minerals_geophysical_no_raca.pth")
+
+    # No USADATA inference here. Just training and saving two models.
