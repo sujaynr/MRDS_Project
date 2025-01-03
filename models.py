@@ -5,11 +5,12 @@ import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import segmentation_models_pytorch as smp
+import copy
 
 from utils import gaussian_filter
 
 
-class MineralDataset(Dataset):
+class MineralDataset(Dataset): #FIX bug WITH INDEXING WHEN MINERALS NOT THERE
     def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1, unet=False):
         self.counts = counts[indices]
         self.input_minerals = input_minerals
@@ -23,22 +24,23 @@ class MineralDataset(Dataset):
 
     def __getitem__(self, idx):
         input_data = self.counts[idx].copy()
-        output_data = input_data[self.output_mineral:self.output_mineral+1, :, :]
+        input_data = (input_data > 0).astype(np.float32)
+        output_data = copy.deepcopy(input_data[self.output_mineral:self.output_mineral+1, :, :])
 
-        input_data = gaussian_filter(input_data, sigma=self.sigma, mode='constant', truncate=3.0)
-        output_data = gaussian_filter(output_data, sigma=self.sigma, mode='constant', truncate=3.0)
+        # input_data = gaussian_filter(input_data, sigma=self.sigma, mode='constant', truncate=3.0)
+        # output_data = gaussian_filter(output_data, sigma=self.sigma, mode='constant', truncate=3.0)
         
-        epsilon = 1e-8
-        input_sum = input_data.sum(axis=(1, 2), keepdims=True)
-        output_sum = output_data.sum(axis=(1, 2), keepdims=True)
+        # epsilon = 1e-8
+        # input_sum = input_data.sum(axis=(1, 2), keepdims=True)
+        # output_sum = output_data.sum(axis=(1, 2), keepdims=True)
         
-        if input_sum.sum() > 0:
-            input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
-        if output_sum.sum() > 0:
-            output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
+        # if input_sum.sum() > 0:
+        #     input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
+        # if output_sum.sum() > 0:
+        #     output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
 
         # Mask the output mineral (Nickel) during both training and testing
-        input_data[self.output_mineral, :, :] = 0
+        input_data[self.output_mineral, :, :] = -1 #THIS USED TO BE 0, CHECK
 
         if self.unet:
             pad = (0, 14, 0, 14)  # Padding (left, right, top, bottom)
@@ -46,7 +48,7 @@ class MineralDataset(Dataset):
             output_data = np.pad(output_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
 
 
-        return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32)
+        return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32), torch.tensor([idx], dtype=int)
 
 
 
@@ -139,11 +141,11 @@ class UNet(nn.Module): ############################### ARCH 3
             in_channels=in_channels,
             classes=out_channels
         )
-        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.unet(x)
-        x = self.relu(x)
+        x = self.sigmoid(x)
         return x
 
 

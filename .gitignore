@@ -2,6 +2,7 @@ __pycache__/
 wandb/
 tilingVIS/slice*
 *.h5
+*.pth
 .DS_Store
 preTrainingVis/
 predictionVis/
@@ -19,3 +20,6 @@ RaCA_DATA/
 RACA_PLOTS/
 Sampled_Predictions/
 inference_results/
+GEOPHYSDATA_DEC/
+newRaCA_DATA/
+plotOutputsDec/

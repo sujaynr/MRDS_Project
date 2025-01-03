@@ -20,6 +20,57 @@ def absolute_difference_integral(predicted, target):
     diff_integral = torch.abs(predicted_sum - target_sum).mean()
     return diff_integral
 
+def save_overlay_predictions(predictions, targets, filepath):
+    """
+    Overlay predictions and targets for a batch of images and save them as a tiled image.
+
+    Args:
+        predictions (torch.Tensor): Tensor of shape [B, 1, 64, 64] with values in [0, 1].
+        targets (torch.Tensor): Tensor of shape [B, 1, 64, 64] with binary values (0 or 1).
+        filepath (str): Path to save the tiled image.
+    """
+    if not (predictions.shape == targets.shape):
+        raise ValueError("Predictions and targets must have the same shape.")
+
+    batch_size, _, height, width = predictions.shape
+
+    # Create a numpy array for visualization
+    overlay_images = []
+
+    for i in range(batch_size):
+        pred = predictions[i, 0].detach().cpu().numpy()
+        target = targets[i, 0].detach().cpu().numpy()
+
+        # Create RGB image
+        overlay = np.zeros((height, width, 3), dtype=np.float32)
+        overlay[..., 0] = pred  # Red channel for predictions
+        overlay[..., 2] = target  # Blue channel for targets
+
+        overlay_images.append(overlay)
+
+    # Determine grid size for tiling
+    grid_size = int(np.ceil(np.sqrt(batch_size)))
+
+    # Create a tiled image
+    tiled_image = np.zeros((grid_size * height, grid_size * width, 3), dtype=np.float32)
+
+    for idx, img in enumerate(overlay_images):
+        row = idx // grid_size
+        col = idx % grid_size
+        tiled_image[row * height:(row + 1) * height, col * width:(col + 1) * width, :] = img
+
+    # Save the image
+    plt.figure(figsize=(10, 10))
+    plt.imshow(tiled_image)
+    plt.axis('off')
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    plt.savefig(filepath, bbox_inches='tight')
+    plt.close()
+
+    return tiled_image
+
 
 # def masked_mse_loss(predicted, target, mask, include_true_negatives=False):
 #     mask = mask.to(predicted.device)  # Ensure mask is on the same device as predicted and target
@@ -60,6 +111,49 @@ def absolute_difference_integral(predicted, target):
 #     else:
 #         raise ValueError(f"Unknown first_loss_type: {first_loss_type}")
 
+import os
+from PIL import Image
+
+def create_gif(image_folder, gif_name, prefix, max_images=30, duration=200):
+    """
+    Creates a GIF from images in the specified folder with a given prefix.
+
+    :param image_folder: Path to the folder containing images.
+    :param gif_name: Name of the output GIF file.
+    :param prefix: Prefix of image files to include in the GIF.
+    :param max_images: Maximum number of images to include.
+    :param duration: Duration of each frame in milliseconds.
+    """
+    # Collect PNG files with the given prefix and sort them by epoch
+    images = []
+    for filename in sorted(os.listdir(image_folder)):
+        if filename.startswith(prefix) and filename.endswith('.png'):
+            images.append(os.path.join(image_folder, filename))
+    
+    # Limit to the first `max_images`
+    images = images[:max_images]
+
+    if not images:
+        print(f"No images found for prefix '{prefix}'")
+        return
+    
+    # Load images
+    frames = [Image.open(image) for image in images]
+    
+    # Save the images as a GIF
+    gif_path = os.path.join(image_folder, gif_name)
+    frames[0].save(
+        gif_path,
+        save_all=True,
+        append_images=frames[1:],
+        optimize=False,
+        duration=duration,  # Slower duration per frame
+        loop=0  # Infinite loop
+    )
+    print(f"GIF saved as {gif_path}")
+
+# Paths
+
 
 def create_nonzero_mask(mineral_data):
     # Create a mask where cells with any nonzero value in any mineral layer are marked as 1, others as 0
@@ -67,7 +161,7 @@ def create_nonzero_mask(mineral_data):
     return nonzero_mask
 
 
-def dice_coefficient_nonzero(pred, target, threshold=0.0, smooth=1e-6):
+def dice_coefficient_nonzero(pred, target, threshold=0.5, smooth=1e-6):
     pred = (pred > threshold).float().to(target.device)
     target = (target > threshold).float().to(target.device)
 
