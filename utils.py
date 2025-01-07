@@ -20,7 +20,7 @@ def absolute_difference_integral(predicted, target):
     diff_integral = torch.abs(predicted_sum - target_sum).mean()
     return diff_integral
 
-def save_overlay_predictions(predictions, targets, filepath):
+def save_overlay_predictions(predictions, targets, mask, idx, filepath):
     """
     Overlay predictions and targets for a batch of images and save them as a tiled image.
 
@@ -33,19 +33,19 @@ def save_overlay_predictions(predictions, targets, filepath):
         raise ValueError("Predictions and targets must have the same shape.")
 
     batch_size, _, height, width = predictions.shape
-
     # Create a numpy array for visualization
     overlay_images = []
 
     for i in range(batch_size):
-        pred = predictions[i, 0].detach().cpu().numpy()
-        target = targets[i, 0].detach().cpu().numpy()
+        pred = predictions[i, idx].detach().cpu().numpy()
+        target = targets[i, idx].detach().cpu().numpy()
+        this_mask = mask[i, idx].detach().cpu().numpy()
 
         # Create RGB image
         overlay = np.zeros((height, width, 3), dtype=np.float32)
-        overlay[..., 0] = pred  # Red channel for predictions
-        overlay[..., 2] = target  # Blue channel for targets
-
+        overlay[..., 0] = pred * this_mask  # Red channel for predictions
+        overlay[..., 2] = target * (1 - this_mask)  # Blue channel for unmasked targets
+        overlay[..., 1] = target * this_mask  # Green channel for masked targets
         overlay_images.append(overlay)
 
     # Determine grid size for tiling
@@ -159,22 +159,32 @@ def create_nonzero_mask(mineral_data):
     # Create a mask where cells with any nonzero value in any mineral layer are marked as 1, others as 0
     nonzero_mask = (mineral_data.sum(axis=1) > 0).float()
     return nonzero_mask
-
-
 def dice_coefficient_nonzero(pred, target, threshold=0.5, smooth=1e-6):
+    """
+    Computes the Dice coefficient on the nonzero regions, restricted to the masked regions.
+
+    Args:
+        pred (torch.Tensor): Predicted tensor.
+        target (torch.Tensor): Ground truth tensor.
+        threshold (float): Threshold to binarize the predicted values.
+        smooth (float): Smoothing constant to avoid division by zero.
+
+    Returns:
+        float: Dice coefficient on the masked nonzero regions.
+    """
     pred = (pred > threshold).float().to(target.device)
     target = (target > threshold).float().to(target.device)
 
+    # Flatten the tensorss
     pred_flat = pred.view(-1)
     target_flat = target.view(-1)
 
+    # Calculate Dice coefficient for nonzero regions within the mask
     nonzero_mask = (pred_flat + target_flat) > 0
-
     pred_nonzero = pred_flat[nonzero_mask]
     target_nonzero = target_flat[nonzero_mask]
 
     intersection = (pred_nonzero * target_nonzero).sum()
-
     dice = (2. * intersection + smooth) / (pred_nonzero.sum() + target_nonzero.sum() + smooth)
     return dice
 

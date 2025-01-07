@@ -10,9 +10,10 @@ import pandas as pd
 import pdb
 import random
 import wandb
+from torchmetrics.functional.classification import binary_precision_recall_curve
 from torch.utils.data import Dataset, DataLoader
 import os
-from models import LinToConv, SimplifiedMLP, LinToTransformer, MineralDataset, UNet, TransformerToConv
+from models import LinToConv, SimplifiedMLP, LinToTransformer, MineralDataset, UNet, TransformerToConv, SpatialTransformer
 from utils import (integral_loss, regular_loss, nonempty_loss, 
                    dice_coefficient_nonzero, absolute_difference_integral, save_overlay_predictions, create_gif)
 
@@ -26,7 +27,7 @@ parser.add_argument('--nhead', type=int, default=4, help='Number of heads in the
 parser.add_argument('--num_layers', type=int, default=1, help='Number of layers in the transformer.')
 parser.add_argument('--d_model', type=int, default=256, help='Model dimension for the transformer.')
 parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for the models.')
-parser.add_argument('--model_type', type=str, default='u', choices=['tc', 'u', 'lc', 'lt', 'l'], help='Model type.')
+parser.add_argument('--model_type', type=str, default='u', choices=['tc', 'u', 'lc', 'lt', 'l', 'spatial_transformer'], help='Model type.')
 parser.add_argument('--output_mineral_name', type=str, default='Gold', help='Name of the output mineral.')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate for training.')
 parser.add_argument('--num_epochs', type=int, default=10, help='Number of epochs for training.')
@@ -156,7 +157,7 @@ def evaluate(model, data_loader, criterion, raca_data=None, raca_encoder=None):
     total_dice_coef = []
 
     with torch.no_grad():
-        for inputs, targets, idx in data_loader:
+        for inputs, targets, idx, mask in data_loader: #FIX FOR MASK
             inputs, targets = inputs.to(device), targets.to(device)
 
             # Conditionally add RaCA embeddings if enabled
@@ -193,8 +194,15 @@ def create_model(args, num_channels):
             num_layers=args.num_layers,
             dropout_rate=args.dropout_rate
         )
+    elif args.model_type == "spatial_transformer":
+        model = SpatialTransformer(
+            in_channels = num_channels,
+            out_channels=10 if args.output_mineral_name == "all" else 1,
+            hidden_dim=32,
+            num_layers=2
+            )
     elif args.model_type == "u":
-        model = UNet(in_channels=num_channels, out_channels=1)
+        model = UNet(in_channels=num_channels, out_channels=10 if args.output_mineral_name == "all" else 1)
     elif args.model_type == "lc":
         model = LinToConv(
             input_dim=num_channels * args.grid_size * args.grid_size,
@@ -272,6 +280,37 @@ class Conv1DEncoder(nn.Module):
         # Final embedding
         embedding = self.fc(x)  # (batch_size, output_dim)
         return embedding
+    
+def compute_aux_metrics(outputs, target, mask, prefix = "train"):
+    metrics = {}
+
+    # Masked outputs and targets
+    outputs_masked = torch.masked_select(outputs, mask.bool())
+    targets_masked = torch.masked_select(target, mask.bool())
+
+    # DICE
+    metrics[f"{prefix}/DICE_Avg"] = dice_coefficient_nonzero(outputs_masked, targets_masked)
+
+    # Integral MSE
+    integral_mask = torch.amax(mask, dim = (2,3))
+    intergral_mse_unreduced = F.mse_loss(torch.sum((outputs * mask), dim=[2, 3]), torch.sum((target * mask), dim=[2, 3]), reduction = "none")
+    metrics[f"{prefix}/IntegralMSE_Avg"] = torch.masked_select(intergral_mse_unreduced, integral_mask.bool()).mean()
+
+    # Pixel MSE
+    metrics[f"{prefix}/PixelMSE_Avg"] = F.mse_loss(outputs_masked, targets_masked, reduction='mean')
+
+    # Precision and Recall
+    precision, recall, thresholds = binary_precision_recall_curve(outputs_masked, targets_masked.int(), thresholds = 5)
+    for idx, threshold in enumerate(thresholds):
+        metrics[f"{prefix}/Precision_{threshold}_Avg"] = precision[idx].mean()
+        metrics[f"{prefix}/Recall_{threshold}_Avg"] = recall[idx].mean()
+
+    return metrics
+
+
+
+    
+
 def prepare_and_train(data, suffix):
     print(f"Preparing and training model: {suffix}...")
     actual_num_layers = 0
@@ -306,7 +345,10 @@ def prepare_and_train(data, suffix):
     log_name = f"{args.logName}_{'_'.join(used_flags)}"
     wandb.init(project="mineral_transformer_project", name=log_name, config=vars(args))
 
-    output_mineral = elements.index(args.output_mineral_name)
+    if args.output_mineral_name == "all":
+        output_mineral = None
+    else:
+        output_mineral = elements.index(args.output_mineral_name)
     input_minerals = [i for i in range(len(elements)) if i != output_mineral]
 
     train_dataset = MineralDataset(
@@ -345,9 +387,9 @@ def prepare_and_train(data, suffix):
         model.train()
         raca_encoder.train()
         total_train_loss = 0
-        trainDC = []
-        for inputs, targets, idx in train_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
+        train_metrics = {}
+        for inputs, targets, idx, mask in train_loader:
+            inputs, targets, mask = inputs.to(device), targets.to(device), mask.to(device)
 
             optimizer.zero_grad()
 
@@ -359,15 +401,22 @@ def prepare_and_train(data, suffix):
             loss = criterion(outputs, targets)
             loss.backward()
             with torch.no_grad():
-                trainDC.append(dice_coefficient_nonzero(outputs, targets))
+                aux_metrics = compute_aux_metrics(outputs, targets, mask)
+                if train_metrics:
+                    train_metrics = {k : v + aux_metrics[k] for k,v in train_metrics.items()}
+                else:
+                    train_metrics = aux_metrics
+
             optimizer.step()
 
             total_train_loss += loss.item()
 
         avg_train_loss = total_train_loss / len(train_loader)
-        avg_train_DC = torch.stack(trainDC).mean()
+        train_metrics = {k: v / len(train_loader) for k, v in train_metrics.items()}
         with torch.no_grad():
-            train_tiled_image = save_overlay_predictions(outputs, targets, f'/home/sujaynair/MRDS_Project/plotOutputsDec/train_{epoch}.png')
+            all_train_images = {}
+            for k in range(10):
+                all_train_images[k] = save_overlay_predictions(outputs, targets, mask, k, f'/home/sujaynair/MRDS_Project/plotOutputsDec/train_{epoch}.png')
 
         # ------------------
         #     Testing
@@ -375,10 +424,10 @@ def prepare_and_train(data, suffix):
         model.eval()
         raca_encoder.eval()
         total_test_loss = 0
-        testDC = []
+        test_metrics = {}
         with torch.no_grad():
-            for inputs, targets, idx in test_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
+            for inputs, targets, idx, mask in test_loader:
+                inputs, targets, mask = inputs.to(device), targets.to(device), mask.to(device)
 
                 if args.use_raca_data:
                     raca_embeddings = getRACAembed(raca_data, idx, raca_encoder)
@@ -386,53 +435,68 @@ def prepare_and_train(data, suffix):
 
                 outputs = model(inputs)
                 total_test_loss += criterion(outputs, targets).item()
-                testDC.append(dice_coefficient_nonzero(outputs, targets))
-            test_tiled_image = save_overlay_predictions(outputs, targets, f'/home/sujaynair/MRDS_Project/plotOutputsDec/test_{epoch}.png')
+
+                aux_metrics = compute_aux_metrics(outputs, targets, mask, prefix="test")
+                if test_metrics:
+                    test_metrics = {k : v + aux_metrics[k] for k,v in test_metrics.items()}
+                else:
+                    test_metrics = aux_metrics
+
+            all_test_images = {}
+            for k in range(10):
+                all_test_images[k] = save_overlay_predictions(outputs, targets, mask, k, f'/home/sujaynair/MRDS_Project/plotOutputsDec/test_{epoch}.png')
 
         avg_test_loss = total_test_loss / len(test_loader)
-        avg_test_DC = torch.stack(testDC).mean()
+        test_metrics = {k: v / len(test_loader) for k, v in test_metrics.items()}
 
         # Log metrics to WandB
-        wandb.log({
+        logs = {
             "epoch": epoch + 1,
             "train_loss": avg_train_loss,
             "test_loss": avg_test_loss,
-            "avg train DC": avg_train_DC,
-            "avg test DC": avg_test_DC,
-            "Train Prediction": wandb.Image(train_tiled_image),
-            "Test Prediction": wandb.Image(test_tiled_image)
-        })
-        print(f"Epoch {epoch+1}/{args.num_epochs} - "
-              f"Avg Train Loss: {avg_train_loss:.4f}, Avg Test Loss: {avg_test_loss:.4f}, Avg Train DC: {avg_train_DC}, Avg Test DC: {avg_test_DC}")
+        } | train_metrics | test_metrics
+        for k in range(10):
+            logs[f"Train viz at mineral {k}"] = wandb.Image(all_train_images[k])
+            logs[f"Test viz at mineral {k}"] = wandb.Image(all_test_images[k])
 
+        wandb.log(logs)
+        print("-" * 50)
+        print("-" * 50)
+        print(f"Epoch {epoch+1}/{args.num_epochs}")
+        print(f"Avg Train Loss: {avg_train_loss:.4f}, Avg Test Loss: {avg_test_loss:.4f}")
+        for k, v in logs.items():
+            if "DICE" in k or "MSE" in k:
+              print(f"Aux Metric {k}: {v}")
+        print("-" * 50)
+        print("-" * 50)
     # ------------------
     #   Save the Model
     # ------------------
     torch.save({
         "model_state_dict": model.state_dict(),
         "raca_encoder_state_dict": raca_encoder.state_dict(),
-    }, f"model_{suffix}.pth")
+    }, f"model_{suffix}_{log_name}.pth")
     print(f"Model {suffix} saved successfully.")
 
     # ------------------
     #     Evaluate
     # ------------------
-    avg_loss, avg_dice = evaluate(model, test_loader, criterion, raca_data, raca_encoder)
+    # avg_loss, avg_dice = evaluate(model, test_loader, criterion, raca_data, raca_encoder)
 
     # Log evaluation metrics to WandB
-    wandb.log({
-        "avg_loss": avg_loss,
-        "avg_dice_coefficient": avg_dice,
-    })
+    # wandb.log({
+    #     "avg_loss": avg_loss,
+    #     "avg_dice_coefficient": avg_dice,
+    # })
 
-    print(f"Model {suffix} evaluation completed: "
-          f"Avg Loss: {avg_loss:.4f}, Avg Dice Coefficient: {avg_dice:.4f}")
+    # print(f"Model {suffix} evaluation completed: "
+    #       f"Avg Loss: {avg_loss:.4f}, Avg Dice Coefficient: {avg_dice:.4f}")
 
     # End WandB logging
     wandb.finish()
 
 # Call prepare_and_train with combined data
-prepare_and_train(combined_data, "TEST_BCE_prediction_1")
+prepare_and_train(combined_data, "0104")
 # Paths
 image_folder = "/home/sujaynair/MRDS_Project/plotOutputsDec"  # Replace with the path to your folder
 train_gif_name = "train.gif"

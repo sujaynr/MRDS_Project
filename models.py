@@ -1,3 +1,4 @@
+import random
 import torch
 import torch.nn.functional as F
 import pdb
@@ -9,6 +10,23 @@ import copy
 
 from utils import gaussian_filter
 
+
+
+
+
+def mask_random_rectangle(array, mask_value=0):
+    N, H, W = array.shape
+    # Randomly choose rectangle dimensions
+    rect_height = np.random.randint(1, H + 1)  # Random height (1 to H)
+    rect_width = np.random.randint(1, W + 1)   # Random width (1 to W)
+    
+    # Randomly choose top-left corner of the rectangle
+    start_y = np.random.randint(0, H - rect_height + 1)
+    start_x = np.random.randint(0, W - rect_width + 1)
+    
+    # Apply the mask to all [N, :, :] slices
+    array[:, start_y:start_y + rect_height, start_x:start_x + rect_width] = mask_value
+    return array
 
 class MineralDataset(Dataset): #FIX bug WITH INDEXING WHEN MINERALS NOT THERE
     def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1, unet=False):
@@ -25,34 +43,149 @@ class MineralDataset(Dataset): #FIX bug WITH INDEXING WHEN MINERALS NOT THERE
     def __getitem__(self, idx):
         input_data = self.counts[idx].copy()
         input_data = (input_data > 0).astype(np.float32)
-        output_data = copy.deepcopy(input_data[self.output_mineral:self.output_mineral+1, :, :])
 
-        # input_data = gaussian_filter(input_data, sigma=self.sigma, mode='constant', truncate=3.0)
-        # output_data = gaussian_filter(output_data, sigma=self.sigma, mode='constant', truncate=3.0)
-        
-        # epsilon = 1e-8
-        # input_sum = input_data.sum(axis=(1, 2), keepdims=True)
-        # output_sum = output_data.sum(axis=(1, 2), keepdims=True)
-        
-        # if input_sum.sum() > 0:
-        #     input_data = np.where(input_sum > 0, input_data / (input_sum + epsilon) * self.counts[idx].sum(axis=(1, 2), keepdims=True), input_data)
-        # if output_sum.sum() > 0:
-        #     output_data = np.where(output_sum > 0, output_data / (output_sum + epsilon) * self.counts[idx, self.output_mineral:self.output_mineral+1, :, :].sum(axis=(1, 2), keepdims=True), output_data)
 
-        # Mask the output mineral (Nickel) during both training and testing
-        input_data[self.output_mineral, :, :] = -1 #THIS USED TO BE 0, CHECK
+        if self.output_mineral is not None:
+            output_data = copy.deepcopy(input_data[self.output_mineral:self.output_mineral+1, :, :])
+            mask = np.zeros_like(output_data, dtype=np.uint8)
+            input_data[self.output_mineral, :, :] = -1
+            mask[self.output_mineral, :, :] = 1
+        else:
+            output_data = copy.deepcopy(input_data[0:10, :, :])
+            mask = np.zeros_like(output_data, dtype=np.uint8)
+            if np.random.uniform() < 0.5:
+                input_data[0:10, :, :] = mask_random_rectangle(input_data[0:10, :, :], -1)
+                mask[0:10, :, :] = 1 * (input_data[0:10, :, :] == -1)
+            else:
+                n = random.randint(1, 10)
+                numbers = random.sample(range(10), n)
+                mask[numbers, :, :] = 1
+                input_data[numbers, :, :] = -1
 
         if self.unet:
             pad = (0, 14, 0, 14)  # Padding (left, right, top, bottom)
             input_data = np.pad(input_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
             output_data = np.pad(output_data, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
+            mask = np.pad(mask, ((0, 0), pad[:2], pad[2:]), mode='constant', constant_values=0)
 
 
-        return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32), torch.tensor([idx], dtype=int)
+        return torch.tensor(input_data, dtype=torch.float32), torch.tensor(output_data, dtype=torch.float32), torch.tensor([idx], dtype=int), torch.tensor(mask, dtype=torch.float32)
 
 
 
 grid_size = 50  # Adjusted to 50x50 grid
+
+
+
+import torch
+import torch.nn as nn
+
+class SpatialTransformer(nn.Module):
+    """
+    A Transformer that interprets the spatial dimensions (H, W) as the sequence dimension.
+    Input shape:  [B, N, H, W]
+    Output shape: [B, M, H, W]
+    
+    Args:
+        in_channels:  Number of input channels (N).
+        out_channels: Number of output channels (M).
+        hidden_dim:   Internal embedding dimension of the Transformer.
+        nhead:        Number of attention heads.
+        num_layers:   Number of Transformer encoder layers.
+        max_size:     Maximum spatial size for the learnable embeddings
+                      (must be >= max(H, W) you expect at runtime).
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        hidden_dim: int = 128,
+        nhead: int = 8,
+        num_layers: int = 6,
+        max_size: int = 256,
+    ):
+        super().__init__()
+        
+        # Project from in_channels (N) to hidden_dim
+        self.input_proj = nn.Linear(in_channels, hidden_dim)
+        
+        # Learnable row and column embeddings
+        # We assume H, W <= max_size
+        self.row_embed = nn.Embedding(max_size, hidden_dim // 2)
+        self.col_embed = nn.Embedding(max_size, hidden_dim // 2)
+        
+        # Define the Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim, 
+            nhead=nhead,
+            batch_first=False  # PyTorch Transformer expects (seq, batch, dim) by default
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, 
+            num_layers=num_layers
+        )
+        
+        # Project from hidden_dim to out_channels (M)
+        self.output_proj = nn.Linear(hidden_dim, out_channels)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, N, H, W]
+        
+        Returns:
+            [B, M, H, W]
+        """
+        b, n, h, w = x.shape
+        
+        # 1) Flatten spatial dimensions to a sequence: (H * W)
+        #    -> shape: [B, N, H*W] -> [B, H*W, N]
+        x = x.view(b, n, h * w).permute(0, 2, 1)  # [B, H*W, N]
+        
+        # 2) Project input to hidden_dim
+        x = self.input_proj(x)  # [B, H*W, hidden_dim]
+        
+        # 3) Create 2D positional embeddings
+        #    We'll embed row indices and column indices, then sum them.
+        row_ids = torch.arange(h, device=x.device)
+        col_ids = torch.arange(w, device=x.device)
+        
+        # shape: [h, hidden_dim//2], [w, hidden_dim//2]
+        row_emb = self.row_embed(row_ids)  # [h, hidden_dim//2]
+        col_emb = self.col_embed(col_ids)  # [w, hidden_dim//2]
+
+        row_emb_expanded = row_emb.unsqueeze(1).expand(-1, w, -1)  # [h, w, hidden_dim//2]
+        col_emb_expanded = col_emb.unsqueeze(0).expand(h, -1, -1)  # [h, w, hidden_dim//2]
+        pos = torch.cat([row_emb_expanded, col_emb_expanded], dim=-1)  # [h, w, hidden_dim]
+        
+        # Flatten to [h*w, hidden_dim]
+        pos = pos.view(h * w, -1)  # [h*w, hidden_dim]
+        
+        # Repeat pos for each element in the batch => [B, h*w, hidden_dim]
+        pos = pos.unsqueeze(0).expand(b, -1, -1)  # [B, H*W, hidden_dim]
+
+        # 4) Add positional embeddings
+        x = x + pos  # [B, H*W, hidden_dim]
+        
+        # 5) The PyTorch Transformer expects input of shape [seq_len, batch_size, dim]
+        x = x.permute(1, 0, 2)  # [H*W, B, hidden_dim]
+        
+        # 6) Pass through the Transformer encoder
+        x = self.transformer_encoder(x)  # [H*W, B, hidden_dim]
+        
+        # 7) Convert back to [B, H*W, hidden_dim]
+        x = x.permute(1, 0, 2)  # [B, H*W, hidden_dim]
+        
+        # 8) Project to out_channels (M)
+        x = self.output_proj(x)  # [B, H*W, M]
+        
+        # 9) Reshape back to [B, M, H, W]
+        x = x.view(b, h, w, -1).permute(0, 3, 1, 2)  # [B, M, H, W]
+
+        x = self.sigmoid(x)
+        return x
+
 
 
 class TransformerToConv(nn.Module): ############################### ARCH 2
