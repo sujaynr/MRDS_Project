@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 file_path = '/home/sujaynair/mrds.csv'
 shapefile_path = '/home/sujaynair/ne_110m_admin_0_countries.shp'
 data_dir = 'prepared_data_TILES'
-# h5_file_path = os.path.join(data_dir, 'mineralDataWithCoords.h5')
+h5_file_path = os.path.join(data_dir, '100kmineralDataWithCoords.h5')
 
 # Ensure data directory exists
 os.makedirs(data_dir, exist_ok=True)
@@ -123,7 +123,8 @@ def fill_cells(df, square, grid_size=50, cell_size=1):
     return cell_counts, cell_qualities
 
 # Main function to create the HDF5 file
-def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
+# Main function to create the HDF5 file
+def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1, save_interval=20000):
     print("Generating random squares...")
     squares, counts, qualities = generate_random_squares(df, num_squares, us_shape)
 
@@ -142,15 +143,22 @@ def create_hdf5_file(h5_file_path, df, num_squares, grid_size=50, cell_size=1):
 
         for idx, square in enumerate(squares):
             print(f"Processing square {idx + 1}/{num_squares}...")
-            # counts, qualities = fill_cells(df, square, grid_size, cell_size)
             count_ds[idx] = counts[idx]
             quality_ds[idx] = qualities[idx]
             coord_ds[idx] = square
-    
+            
+            # Save the model periodically
+            if (idx + 1) % save_interval == 0:
+                temp_path = f"{h5_file_path.rsplit('.', 1)[0]}_{idx + 1}.h5"
+                print(f"Saving intermediate HDF5 file at {temp_path}...")
+                with h5py.File(temp_path, 'w') as temp_f:
+                    for name, ds in f.items():
+                        temp_f.create_dataset(name, data=ds[:idx + 1])
+
     return squares
 
 # Create the HDF5 file
-squares = create_hdf5_file(None, df, num_squares=10000)
+squares = create_hdf5_file(h5_file_path, df, num_squares=100000)
 
 print("Data preparation completed.")
 # Visualization
@@ -168,4 +176,4 @@ def visualize_squares(squares, us_shape, output_path='generated_squares2.png'):
     plt.close(fig)
 
 # Example usage
-visualize_squares(squares, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares2.png')
+# visualize_squares(squares, us_shape, output_path='/home/sujaynair/MRDS_Project/tilingVIS/generated_squares2.png')

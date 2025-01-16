@@ -7,6 +7,7 @@ import h5py
 import numpy as np
 import pickle
 import pandas as pd
+import matplotlib.pyplot as plt
 import pdb
 import random
 import wandb
@@ -36,8 +37,10 @@ parser.add_argument('--two_step', type=str, default='True', help='Whether to use
 parser.add_argument('--logName', type=str, default='testB3', help='Name of the log file.')
 parser.add_argument('--use_bce', action='store_true', help='Use binary cross-entropy loss for resource presence detection.')
 parser.add_argument('--tn', action='store_true', help='Include true negatives in the evaluation.')
-parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training.')
+parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training.')
 parser.add_argument('--set_seed', type=int, default=42, help='Set seed for reproducibility.')
+parser.add_argument('--raca_odim', type=int, default=64, help='Set raca hidden dim')
+parser.add_argument('--unetArch', type=str, default="resnet152", choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'], help='Unet encoder architecture')
 #new flags:
 parser.add_argument('--use_minerals', action='store_true', help='Include mineral data.')
 parser.add_argument('--use_geophys', action='store_true', help='Include geophysical data.')
@@ -202,7 +205,7 @@ def create_model(args, num_channels):
             num_layers=2
             )
     elif args.model_type == "u":
-        model = UNet(in_channels=num_channels, out_channels=10 if args.output_mineral_name == "all" else 1)
+        model = UNet(in_channels=num_channels, out_channels=10 if args.output_mineral_name == "all" else 1, arch=args.unetArch)
     elif args.model_type == "lc":
         model = LinToConv(
             input_dim=num_channels * args.grid_size * args.grid_size,
@@ -231,7 +234,7 @@ def create_model(args, num_channels):
 
 def getRACAembed(raca, indices, encoder):
     indices = indices.squeeze().tolist()
-    output = torch.zeros((len(indices), 50, 50, 32)).to(device)
+    output = torch.zeros((len(indices), 50, 50, args.raca_odim)).to(device)
     for idx_, idx in enumerate(indices):
         for lat_idx, lat in enumerate(raca[idx]):
             for lon_idx, lon in enumerate(lat):
@@ -245,15 +248,16 @@ def getRACAembed(raca, indices, encoder):
                     output[idx_, lat_idx, lon_idx] = embeddings.mean(0)
 
     permuted_output = output.permute(0, 3, 1, 2)
-    pad = (0, 14, 0, 14)
-    permuted_output = F.pad(permuted_output, pad, mode='constant', value=0)
+    if args.model_type == "u":
+        pad = (0, 14, 0, 14)
+        permuted_output = F.pad(permuted_output, pad, mode='constant', value=0)
 
     return permuted_output
 
 
 
 class Conv1DEncoder(nn.Module):
-    def __init__(self, input_dim=2150, output_dim=32, hidden_channels=64):
+    def __init__(self, input_dim=2150, output_dim=args.raca_odim, hidden_channels=64):
         super(Conv1DEncoder, self).__init__()
         self.input_dim = input_dim
 
@@ -284,12 +288,21 @@ class Conv1DEncoder(nn.Module):
 def compute_aux_metrics(outputs, target, mask, prefix = "train"):
     metrics = {}
 
+    # print(outputs.shape, target.shape)
+    outputs_agg, _ = outputs.max(dim=1)
+    target_agg, _ = target.max(dim=1)
+    mask_agg, _ = mask.max(dim=1)
+
     # Masked outputs and targets
     outputs_masked = torch.masked_select(outputs, mask.bool())
     targets_masked = torch.masked_select(target, mask.bool())
 
+    outputs_agg_masked = torch.masked_select(outputs_agg, mask_agg.bool())
+    target_agg_masked = torch.masked_select(target_agg, mask_agg.bool())
+
     # DICE
     metrics[f"{prefix}/DICE_Avg"] = dice_coefficient_nonzero(outputs_masked, targets_masked)
+    metrics[f"{prefix}/AGG_DICE_Avg"] = dice_coefficient_nonzero(outputs_agg_masked, target_agg_masked)
 
     # Integral MSE
     integral_mask = torch.amax(mask, dim = (2,3))
@@ -300,12 +313,15 @@ def compute_aux_metrics(outputs, target, mask, prefix = "train"):
     metrics[f"{prefix}/PixelMSE_Avg"] = F.mse_loss(outputs_masked, targets_masked, reduction='mean')
 
     # Precision and Recall
-    precision, recall, thresholds = binary_precision_recall_curve(outputs_masked, targets_masked.int(), thresholds = 5)
-    for idx, threshold in enumerate(thresholds):
-        metrics[f"{prefix}/Precision_{threshold}_Avg"] = precision[idx].mean()
-        metrics[f"{prefix}/Recall_{threshold}_Avg"] = recall[idx].mean()
+    precision, recall, thresholds = binary_precision_recall_curve(outputs_masked, targets_masked.int(), thresholds = 20, validate_args=True)
+    # print(outputs_masked)
+    # print(targets_masked)
+    # print(precision, recall, thresholds)
+    # for idx, threshold in enumerate(thresholds):
+    #     metrics[f"{prefix}/Precision_{threshold}_Avg"] = precision[idx].mean()
+    #     metrics[f"{prefix}/Recall_{threshold}_Avg"] = recall[idx].mean()
 
-    return metrics
+    return metrics, precision, recall
 
 
 
@@ -330,7 +346,7 @@ def prepare_and_train(data, suffix):
         print("Including geophysical data...")
 
     if args.use_raca_data:
-        actual_num_layers += 32  # Assuming RACA embeddings add 32 channels
+        actual_num_layers += args.raca_odim  # Assuming RACA embeddings add 32 channels
         used_flags.append("raca")
         print("Including RaCA data...")
 
@@ -388,6 +404,8 @@ def prepare_and_train(data, suffix):
         raca_encoder.train()
         total_train_loss = 0
         train_metrics = {}
+        train_precisions = []
+        train_recalls = []
         for inputs, targets, idx, mask in train_loader:
             inputs, targets, mask = inputs.to(device), targets.to(device), mask.to(device)
 
@@ -401,7 +419,9 @@ def prepare_and_train(data, suffix):
             loss = criterion(outputs, targets)
             loss.backward()
             with torch.no_grad():
-                aux_metrics = compute_aux_metrics(outputs, targets, mask)
+                aux_metrics, train_precision, train_recall = compute_aux_metrics(outputs, targets, mask)
+                train_precisions.append(train_precision)
+                train_recalls.append(train_recall)
                 if train_metrics:
                     train_metrics = {k : v + aux_metrics[k] for k,v in train_metrics.items()}
                 else:
@@ -413,9 +433,21 @@ def prepare_and_train(data, suffix):
 
         avg_train_loss = total_train_loss / len(train_loader)
         train_metrics = {k: v / len(train_loader) for k, v in train_metrics.items()}
+        train_precisions = torch.stack(train_precisions).mean(0).cpu().detach().numpy()
+        train_recalls = torch.stack(train_recalls).mean(0).cpu().detach().numpy()
+        plt.plot(train_recalls, train_precisions)
+        plt.title("PR_curve")
+        plt.xlabel("Train_Recall")
+        plt.ylabel("Train_Precision")
+        plt.savefig("train_pr_curve.png")
+        plt.close()
         with torch.no_grad():
             all_train_images = {}
-            for k in range(10):
+            if args.output_mineral_name == "all":
+                plot_indices = list(range(10))
+            else:
+                plot_indices = [0]
+            for k in plot_indices:
                 all_train_images[k] = save_overlay_predictions(outputs, targets, mask, k, f'/home/sujaynair/MRDS_Project/plotOutputsDec/train_{epoch}.png')
 
         # ------------------
@@ -425,6 +457,8 @@ def prepare_and_train(data, suffix):
         raca_encoder.eval()
         total_test_loss = 0
         test_metrics = {}
+        test_precisions = []
+        test_recalls = []
         with torch.no_grad():
             for inputs, targets, idx, mask in test_loader:
                 inputs, targets, mask = inputs.to(device), targets.to(device), mask.to(device)
@@ -436,18 +470,29 @@ def prepare_and_train(data, suffix):
                 outputs = model(inputs)
                 total_test_loss += criterion(outputs, targets).item()
 
-                aux_metrics = compute_aux_metrics(outputs, targets, mask, prefix="test")
+                aux_metrics, test_precision, test_recall = compute_aux_metrics(outputs, targets, mask, prefix = "test")
+                test_precisions.append(test_precision)
+                test_recalls.append(test_recall)
                 if test_metrics:
                     test_metrics = {k : v + aux_metrics[k] for k,v in test_metrics.items()}
                 else:
                     test_metrics = aux_metrics
 
             all_test_images = {}
-            for k in range(10):
+            for k in plot_indices:
                 all_test_images[k] = save_overlay_predictions(outputs, targets, mask, k, f'/home/sujaynair/MRDS_Project/plotOutputsDec/test_{epoch}.png')
 
         avg_test_loss = total_test_loss / len(test_loader)
         test_metrics = {k: v / len(test_loader) for k, v in test_metrics.items()}
+
+        test_precisions = torch.stack(test_precisions).mean(0).cpu().detach().numpy()
+        test_recalls = torch.stack(test_recalls).mean(0).cpu().detach().numpy()
+        plt.plot(test_recalls, test_precisions)
+        plt.title("PR_curve")
+        plt.xlabel("Test_Recall")
+        plt.ylabel("Test_Precision")
+        plt.savefig("test_pr_curve.png")
+        plt.close()
 
         # Log metrics to WandB
         logs = {
@@ -455,9 +500,12 @@ def prepare_and_train(data, suffix):
             "train_loss": avg_train_loss,
             "test_loss": avg_test_loss,
         } | train_metrics | test_metrics
-        for k in range(10):
+        for k in plot_indices:
             logs[f"Train viz at mineral {k}"] = wandb.Image(all_train_images[k])
             logs[f"Test viz at mineral {k}"] = wandb.Image(all_test_images[k])
+
+        logs["train/pr_curve"] = wandb.Image("train_pr_curve.png")
+        logs["test/pr_curve"] = wandb.Image("test_pr_curve.png")
 
         wandb.log(logs)
         print("-" * 50)
@@ -472,11 +520,12 @@ def prepare_and_train(data, suffix):
     # ------------------
     #   Save the Model
     # ------------------
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "raca_encoder_state_dict": raca_encoder.state_dict(),
-    }, f"model_{suffix}_{log_name}.pth")
-    print(f"Model {suffix} saved successfully.")
+        if epoch == 250:
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "raca_encoder_state_dict": raca_encoder.state_dict(),
+            }, f"model_{suffix}_{log_name}.pth")
+            print(f"Model {suffix} saved successfully at epoch: {epoch}")
 
     # ------------------
     #     Evaluate
@@ -496,7 +545,7 @@ def prepare_and_train(data, suffix):
     wandb.finish()
 
 # Call prepare_and_train with combined data
-prepare_and_train(combined_data, "0104")
+prepare_and_train(combined_data, "0115")
 # Paths
 image_folder = "/home/sujaynair/MRDS_Project/plotOutputsDec"  # Replace with the path to your folder
 train_gif_name = "train.gif"

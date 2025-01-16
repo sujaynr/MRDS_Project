@@ -76,7 +76,6 @@ class MineralDataset(Dataset): #FIX bug WITH INDEXING WHEN MINERALS NOT THERE
 grid_size = 50  # Adjusted to 50x50 grid
 
 
-
 import torch
 import torch.nn as nn
 
@@ -106,11 +105,21 @@ class SpatialTransformer(nn.Module):
     ):
         super().__init__()
         
+        # --- 1) Convolution to reduce spatial resolution ---
+        # e.g., 3x3 kernel, stride=2, padding=1 => H,W -> H/2, W/2
+        self.conv_down = nn.Conv2d(
+            in_channels, 
+            in_channels,  # keep the same # of feature channels here, or adjust if desired
+            kernel_size=3, 
+            stride=2, 
+            padding=1
+        )
+        
         # Project from in_channels (N) to hidden_dim
         self.input_proj = nn.Linear(in_channels, hidden_dim)
         
         # Learnable row and column embeddings
-        # We assume H, W <= max_size
+        # We assume H, W <= max_size (actually we will use reduced H/2, W/2)
         self.row_embed = nn.Embedding(max_size, hidden_dim // 2)
         self.col_embed = nn.Embedding(max_size, hidden_dim // 2)
         
@@ -127,6 +136,18 @@ class SpatialTransformer(nn.Module):
         
         # Project from hidden_dim to out_channels (M)
         self.output_proj = nn.Linear(hidden_dim, out_channels)
+        
+        # --- 2) Convolution/TransposeConv to restore spatial resolution ---
+        # Use ConvTranspose2d to go from (H/2, W/2) back to (H, W).
+        self.conv_up = nn.ConvTranspose2d(
+            out_channels, 
+            out_channels,
+            kernel_size=3, 
+            stride=2, 
+            padding=1, 
+            output_padding=1
+        )
+        
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -139,52 +160,60 @@ class SpatialTransformer(nn.Module):
         """
         b, n, h, w = x.shape
         
-        # 1) Flatten spatial dimensions to a sequence: (H * W)
-        #    -> shape: [B, N, H*W] -> [B, H*W, N]
-        x = x.view(b, n, h * w).permute(0, 2, 1)  # [B, H*W, N]
+        # --- (A) Reduce spatial dimensions via conv_down ---
+        # After conv_down with stride=2, shape is [B, N, H/2, W/2].
+        x = self.conv_down(x)
         
-        # 2) Project input to hidden_dim
-        x = self.input_proj(x)  # [B, H*W, hidden_dim]
+        # Recompute shape
+        b, n, h2, w2 = x.shape
         
-        # 3) Create 2D positional embeddings
-        #    We'll embed row indices and column indices, then sum them.
-        row_ids = torch.arange(h, device=x.device)
-        col_ids = torch.arange(w, device=x.device)
+        # --- (B) Flatten the reduced-spatial map for the Transformer ---
+        # shape: [B, N, h2*w2] -> [B, h2*w2, N]
+        x = x.view(b, n, h2 * w2).permute(0, 2, 1)  # [B, h2*w2, N]
         
-        # shape: [h, hidden_dim//2], [w, hidden_dim//2]
-        row_emb = self.row_embed(row_ids)  # [h, hidden_dim//2]
-        col_emb = self.col_embed(col_ids)  # [w, hidden_dim//2]
+        # --- (C) Project input to hidden_dim ---
+        x = self.input_proj(x)  # [B, h2*w2, hidden_dim]
+        
+        # --- (D) 2D positional embeddings (for the reduced H/2, W/2) ---
+        row_ids = torch.arange(h2, device=x.device)
+        col_ids = torch.arange(w2, device=x.device)
+        
+        row_emb = self.row_embed(row_ids)  # [h2, hidden_dim//2]
+        col_emb = self.col_embed(col_ids)  # [w2, hidden_dim//2]
+        
+        row_emb_expanded = row_emb.unsqueeze(1).expand(-1, w2, -1)  # [h2, w2, hidden_dim//2]
+        col_emb_expanded = col_emb.unsqueeze(0).expand(h2, -1, -1)  # [h2, w2, hidden_dim//2]
+        pos = torch.cat([row_emb_expanded, col_emb_expanded], dim=-1)  # [h2, w2, hidden_dim]
+        
+        # Flatten to [h2*w2, hidden_dim], then batch it
+        pos = pos.view(h2 * w2, -1).unsqueeze(0).expand(b, -1, -1)  # [B, h2*w2, hidden_dim]
+        
+        # --- (E) Add positional embeddings ---
+        x = x + pos  # [B, h2*w2, hidden_dim]
+        
+        # --- (F) Transformer wants [seq_len, batch_size, dim] ---
+        x = x.permute(1, 0, 2)  # [h2*w2, B, hidden_dim]
+        
+        # --- (G) Pass through the Transformer encoder ---
+        x = self.transformer_encoder(x)  # [h2*w2, B, hidden_dim]
+        
+        # --- (H) Convert back to [B, h2*w2, hidden_dim] ---
+        x = x.permute(1, 0, 2)  # [B, h2*w2, hidden_dim]
+        
+        # --- (I) Project to out_channels (M) ---
+        x = self.output_proj(x)  # [B, h2*w2, M]
+        
+        # --- (J) Reshape to the reduced spatial resolution [B, M, h2, w2] ---
+        x = x.view(b, h2, w2, -1).permute(0, 3, 1, 2)  # [B, M, h2, w2]
 
-        row_emb_expanded = row_emb.unsqueeze(1).expand(-1, w, -1)  # [h, w, hidden_dim//2]
-        col_emb_expanded = col_emb.unsqueeze(0).expand(h, -1, -1)  # [h, w, hidden_dim//2]
-        pos = torch.cat([row_emb_expanded, col_emb_expanded], dim=-1)  # [h, w, hidden_dim]
+        # --- (K) Expand back to original resolution [B, M, H, W] ---
+        x = self.conv_up(x)  # [B, M, H, W]
         
-        # Flatten to [h*w, hidden_dim]
-        pos = pos.view(h * w, -1)  # [h*w, hidden_dim]
-        
-        # Repeat pos for each element in the batch => [B, h*w, hidden_dim]
-        pos = pos.unsqueeze(0).expand(b, -1, -1)  # [B, H*W, hidden_dim]
-
-        # 4) Add positional embeddings
-        x = x + pos  # [B, H*W, hidden_dim]
-        
-        # 5) The PyTorch Transformer expects input of shape [seq_len, batch_size, dim]
-        x = x.permute(1, 0, 2)  # [H*W, B, hidden_dim]
-        
-        # 6) Pass through the Transformer encoder
-        x = self.transformer_encoder(x)  # [H*W, B, hidden_dim]
-        
-        # 7) Convert back to [B, H*W, hidden_dim]
-        x = x.permute(1, 0, 2)  # [B, H*W, hidden_dim]
-        
-        # 8) Project to out_channels (M)
-        x = self.output_proj(x)  # [B, H*W, M]
-        
-        # 9) Reshape back to [B, M, H, W]
-        x = x.view(b, h, w, -1).permute(0, 3, 1, 2)  # [B, M, H, W]
-
+        # Optional final activation
         x = self.sigmoid(x)
+        
         return x
+
 
 
 
@@ -266,10 +295,10 @@ class LinToConv(nn.Module): ############################### ARCH 1
         return x
 
 class UNet(nn.Module): ############################### ARCH 3
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, arch="resnet34"):
         super(UNet, self).__init__()
         self.unet = smp.Unet(
-            encoder_name='resnet34', 
+            encoder_name=arch, 
             encoder_weights=None,
             in_channels=in_channels,
             classes=out_channels

@@ -35,7 +35,6 @@ def save_overlay_predictions(predictions, targets, mask, idx, filepath):
     batch_size, _, height, width = predictions.shape
     # Create a numpy array for visualization
     overlay_images = []
-
     for i in range(batch_size):
         pred = predictions[i, idx].detach().cpu().numpy()
         target = targets[i, idx].detach().cpu().numpy()
@@ -174,6 +173,7 @@ def dice_coefficient_nonzero(pred, target, threshold=0.5, smooth=1e-6):
     """
     pred = (pred > threshold).float().to(target.device)
     target = (target > threshold).float().to(target.device)
+    
 
     # Flatten the tensorss
     pred_flat = pred.view(-1)
