@@ -68,10 +68,10 @@
 import subprocess
 
 # Define parameter lists in ascending order
-hidden_dims = [64] # DO FOR 128, 256
+hidden_dims = [64, 128, 256] # DO FOR 128, 256
 nheads      = [4, 8]
 num_layers  = [4]
-batch_sizes = [16, 32]
+batch_sizes = [32, 128]
 seeds       = [42]
 
 # Fixed hyperparameters (adjust as needed)
