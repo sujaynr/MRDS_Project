@@ -29,21 +29,24 @@ def mask_random_rectangle(array, mask_value=0):
     return array
 
 class MineralDataset(Dataset): #FIX bug WITH INDEXING WHEN MINERALS NOT THERE
-    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1, unet=False):
+    def __init__(self, counts, input_minerals, output_mineral, indices, train=True, sigma=1, unet=False, longlat=False):
         self.counts = counts[indices]
         self.input_minerals = input_minerals
         self.output_mineral = output_mineral
         self.train = train
         self.sigma = sigma
         self.unet = unet
+        self.longlat = longlat
 
     def __len__(self):
         return len(self.counts)
 
     def __getitem__(self, idx):
         input_data = self.counts[idx].copy()
-        input_data = (input_data > 0).astype(np.float32)
-
+        if self.longlat :
+            input_data[:-2,:,:] = (input_data[:-2,:,:] > 0).astype(np.float32)
+        else :
+            input_data = (input_data > 0).astype(np.float32)
 
         if self.output_mineral is not None:
             output_data = copy.deepcopy(input_data[self.output_mineral:self.output_mineral+1, :, :])
